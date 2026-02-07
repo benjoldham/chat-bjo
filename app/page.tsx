@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Authenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import { client } from './lib/amplifyClient';
@@ -44,6 +44,12 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const filteredThreads = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -195,8 +201,8 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
         {/* Sidebar */}
         <aside
           className={[
-            'h-full border-r border-zinc-200 bg-zinc-50 transition-all duration-200',
-            sidebarOpen ? 'w-72' : 'w-0',
+            'h-full bg-zinc-50 transition-all duration-200 overflow-hidden',
+            sidebarOpen ? 'w-72 border-r border-zinc-200' : 'w-0 border-r-0',
           ].join(' ')}
         >
           <div className={sidebarOpen ? 'flex h-full flex-col' : 'hidden'}>
@@ -299,15 +305,18 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex justify-start">
-                        <div className="max-w-[85%] whitespace-pre-wrap text-sm leading-relaxed text-zinc-900">
-                          {m.content}
-                        </div>
+                    <div className="flex justify-start">
+                      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm leading-relaxed text-zinc-900 shadow-sm">
+                        {m.content}
                       </div>
+                    </div>
                     )}
                   </div>
                 ))
               )}
+
+              <div ref={bottomRef} />
+
             </div>
           </div>
 
