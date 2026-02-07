@@ -24,3 +24,25 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
+
+/* Only affect the authenticator area */
+[data-amplify-authenticator] {
+  --amplify-fonts-default-variable: var(--font-sans);
+  --amplify-radii-medium: 16px;
+
+  --amplify-colors-background-primary: #ffffff;
+  --amplify-colors-background-secondary: #f4f4f5;
+
+  --amplify-colors-font-primary: #18181b;
+  --amplify-colors-font-secondary: #52525b;
+
+  --amplify-colors-border-primary: #e4e4e7;
+
+  --amplify-components-button-primary-background-color: #18181b;
+  --amplify-components-button-primary-color: #ffffff;
+  --amplify-components-button-primary-hover-background-color: #27272a;
+
+  --amplify-components-fieldcontrol-border-color: #d4d4d8;
+  --amplify-components-fieldcontrol-focus-border-color: #18181b;
+}
+
