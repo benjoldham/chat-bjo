@@ -5,14 +5,14 @@ applications:
       phases:
         build:
           commands:
-            - npm ci --include=dev
+            - npm ci --include=dev --legacy-peer-deps
             - ./node_modules/.bin/ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
             - ./node_modules/.bin/ampx generate outputs --branch $AWS_BRANCH --app-id $AWS_APP_ID
     frontend:
       phases:
         preBuild:
           commands:
-            - npm ci
+            - npm ci --legacy-peer-deps
         build:
           commands:
             - npm run build
