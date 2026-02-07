@@ -6,8 +6,9 @@ applications:
         build:
           commands:
             - npm ci --include=dev --legacy-peer-deps
-            - ./node_modules/.bin/ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
-            - ./node_modules/.bin/ampx generate outputs --branch $AWS_BRANCH --app-id $AWS_APP_ID
+            - echo "npm_config_user_agent=$npm_config_user_agent"
+            - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
+            - npx ampx generate outputs --branch $AWS_BRANCH --app-id $AWS_APP_ID
     frontend:
       phases:
         preBuild:
