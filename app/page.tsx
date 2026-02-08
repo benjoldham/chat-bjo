@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Authenticator } from '@aws-amplify/ui-react';
-import '@aws-amplify/ui-react/styles.css';
+// import '@aws-amplify/ui-react/styles.css';
 import { client } from './lib/amplifyClient';
 
 type Thread = {
@@ -28,6 +28,16 @@ function titleFromFirstUserMessage(text: string) {
   return t.length > 48 ? t.slice(0, 48) + '…' : t || 'New chat';
 }
 
+function TypingIndicator() {
+  return (
+    <span className="typing-dots" aria-label="Thinking">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
 export default function Home() {
   return (
     <Authenticator>
@@ -37,19 +47,51 @@ export default function Home() {
 }
 
 function ChatApp({ onSignOut }: { onSignOut: () => void }) {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [isSwitchingThread, setIsSwitchingThread] = useState(false);
+
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+    function resizeTextarea(el?: HTMLTextAreaElement | null) {
+      const ta = el ?? textareaRef.current;
+      if (!ta) return;
+
+      ta.style.height = 'auto'; // allows shrink
+      ta.style.height = `${Math.min(ta.scrollHeight, 400)}px`; // grow up to 400px
+    }
+
+    function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+      setInput(e.target.value);
+      resizeTextarea(e.target); 
+    }
+
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Sidebar: collapsed by default on <768px, open by default on >=768px
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+
+    const apply = () => setSidebarOpen(mq.matches);
+
+    // Set initial value
+    apply();
+
+    // Keep in sync if the viewport crosses the breakpoint
+    mq.addEventListener?.('change', apply);
+    return () => mq.removeEventListener?.('change', apply);
+  }, []);
 
   const filteredThreads = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -91,11 +133,14 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
     setMessages(items);
   }
 
-  async function newChat() {
-    setActiveThreadId(null);
-    setMessages([]);
-    setInput('');
-  }
+    async function newChat() {
+      setActiveThreadId(null);
+      setMessages([]);
+      setInput('');
+
+      // Mobile UX: close the sidebar so the chat view is visible
+      if (window.innerWidth < 768) setSidebarOpen(false);
+    }
 
   useEffect(() => {
     loadThreads();
@@ -103,8 +148,30 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   }, []);
 
   useEffect(() => {
-    if (activeThreadId) loadMessages(activeThreadId);
-    else setMessages([]);
+    let cancelled = false;
+
+    const run = async () => {
+      // Start fade/loading state immediately on click
+      setIsSwitchingThread(true);
+
+      if (activeThreadId) {
+        await loadMessages(activeThreadId);
+      } else {
+        setMessages([]);
+      }
+
+      // End fade/loading state (guard against race)
+      if (!cancelled) {
+        // let the DOM paint once so the fade feels smooth
+        requestAnimationFrame(() => setIsSwitchingThread(false));
+      }
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
 
@@ -114,6 +181,7 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
 
     setSending(true);
     setInput('');
+    requestAnimationFrame(() => resizeTextarea());
 
     let threadId = activeThreadId;
 
@@ -158,6 +226,19 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
       },
     ]);
 
+    // Add a temporary "thinking" assistant bubble immediately
+    const typingId = `typing-${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: typingId,
+        threadId,
+        role: 'assistant',
+        content: '',
+        createdAt: nowIso(),
+      },
+    ]);
+
     let assistantText = '';
     try {
       const chatRes: any = await client.queries.chat({ prompt: text });
@@ -182,6 +263,9 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
       createdAt: nowIso(),
     });
 
+    // Remove the temporary typing bubble
+    setMessages((prev) => prev.filter((m) => m.id !== typingId));
+
     // Reload messages to keep consistent ordering/ids
     await loadMessages(threadId);
 
@@ -201,54 +285,73 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
         {/* Sidebar */}
         <aside
           className={[
-            'h-full bg-zinc-50 transition-all duration-200 overflow-hidden',
-            sidebarOpen ? 'w-72 border-r border-zinc-200' : 'w-0 border-r-0',
+            // Base
+            'h-full bg-secondary overflow-hidden',
+
+            // Mobile: drawer overlay
+            'fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-200',
+            sidebarOpen ? 'translate-x-0' : '-translate-x-full',
+            'border-r border-zinc-200',
+
+            // Desktop (md+): in-layout sidebar that pushes content (your current behavior)
+            'md:static md:z-auto md:translate-x-0 md:transition-all md:duration-200',
+            sidebarOpen ? 'md:w-72 md:border-r md:border-zinc-200' : 'md:w-0 md:border-r-0',
           ].join(' ')}
         >
-          <div className={sidebarOpen ? 'flex h-full flex-col' : 'hidden'}>
-            <div className="flex items-center justify-between p-3">
-              <div className="text-sm font-semibold text-zinc-700">Your chats</div>
-              <button
-                onClick={() => setSidebarOpen(false)}
-                className="rounded-md px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-200"
-                aria-label="Collapse sidebar"
-              >
+          <div className={sidebarOpen ? 'flex h-full flex-col gap-8' : 'hidden'}>
+            <div className="flex items-center justify-between py-3 px-5 h-14 border-b border-zinc-200">
+              <div className="text-lg font-regular text-primary tracking-tighter">ChatBot</div>
+              <button onClick={() => setSidebarOpen(false)} className="rounded-md px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-200" aria-label="Collapse sidebar">
                 ◀
               </button>
             </div>
 
-            <div className="px-3 pb-2">
-              <button
-                onClick={newChat}
-                className="w-full rounded-lg bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-              >
-                New chat
-              </button>
+            <div id="getStarted" className="flex flex-col p-2.5 gap-2">
+
+              <div className="text-sm px-2.5 font-regular text-secondary tracking-tighter">Get started</div>
+
+              <ul className="space-y-1">
+                <li className="mb-0">
+                  <button
+                    onClick={newChat}
+                    className="w-full rounded-lg px-2.5 py-2  text-sm font-regular text-primary text-left tracking-tighter button sidebar transition"
+                  >
+                    New chat
+                  </button>
+                </li>
+
+                <li className="">
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search chat"
+                    className="w-full rounded-lg px-2.5 py-2 text-sm font-regular tracking-tighter text-primary text-left outline-none focus:border-zinc-400"
+                  />
+                </li>
+              </ul>
+
             </div>
 
-            <div className="px-3 pb-3">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search chat"
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-2 pb-2">
+            <div id="chatHistory" className="flex flex-col flex-1 overflow-y-auto px-2 pb-2 gap-2">
+              <div className="text-sm font-regular text-secondary tracking-tighter px-2.5">Your chats</div>
               {filteredThreads.length === 0 ? (
-                <div className="px-2 py-3 text-sm text-zinc-500">No chats yet.</div>
+                <div className="px-2.5 py-3 text-sm text-primary">No chats yet.</div>
               ) : (
                 <ul className="space-y-1">
                   {filteredThreads.map((t) => (
                     <li key={t.id}>
                       <button
-                        onClick={() => setActiveThreadId(t.id)}
+                        onClick={() => {
+                          setActiveThreadId(t.id);
+
+                          // Close the sidebar on mobile so the chat is visible
+                          if (window.innerWidth < 768) setSidebarOpen(false);
+                        }}
                         className={[
-                          'w-full rounded-lg px-3 py-2 text-left text-sm',
+                          'w-full rounded-lg px-2.5 py-2 text-left text-sm tracking-tighter text-primary transition button sidebar',
                           activeThreadId === t.id
-                            ? 'bg-zinc-200 text-zinc-900'
-                            : 'text-zinc-700 hover:bg-zinc-100',
+                            ? 'item-active'
+                            : 'item-hover',
                         ].join(' ')}
                       >
                         {t.title}
@@ -270,10 +373,19 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
           </div>
         </aside>
 
+        {/* Mobile backdrop when sidebar is open */}
+        {sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 z-40 bg-black/30 md:hidden"
+            aria-label="Close sidebar"
+          />
+        )}
+
         {/* Main */}
         <main className="flex h-full flex-1 flex-col">
           {/* Top bar (mobile sidebar toggle) */}
-          <div className="flex items-center gap-2 border-b border-zinc-200 p-2 md:p-3">
+          <div className="flex items-center gap-2 border-b border-zinc-200 p-2 md:p-3 h-14">
             {!sidebarOpen && (
               <button
                 onClick={() => setSidebarOpen(true)}
@@ -283,13 +395,18 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
                 ☰
               </button>
             )}
-            <div className="text-sm text-zinc-600">
+            <div className="text-lg text-primary">
               {activeThreadId ? 'Chat' : 'New chat'}
             </div>
           </div>
 
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+            <div
+              className={[
+                "relative flex-1 overflow-y-auto px-4 py-6 md:px-8 transition-opacity duration-200 ease-out",
+                isSwitchingThread ? "opacity-40" : "opacity-100",
+              ].join(" ")}
+            >
             <div className="mx-auto max-w-3xl space-y-4">
               {messages.length === 0 ? (
                 <div className="text-sm text-zinc-500">
@@ -300,14 +417,14 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
                   <div key={m.id} className="w-full">
                     {m.role === 'user' ? (
                       <div className="flex justify-end">
-                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-zinc-200 px-4 py-3 text-sm leading-relaxed text-zinc-900">
+                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
                           {m.content}
                         </div>
                       </div>
                     ) : (
                     <div className="flex justify-start">
-                      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm leading-relaxed text-zinc-900 shadow-sm">
-                        {m.content}
+                      <div className="max-w-[85%] whitespace-pre-wrap px-4 py-3 text-md leading-relaxed text-zinc-900">
+                        {m.id.startsWith('typing-') ? <TypingIndicator /> : m.content}
                       </div>
                     </div>
                     )}
@@ -321,24 +438,27 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
           </div>
 
           {/* Composer */}
-          <div className="border-t border-zinc-200 bg-white px-4 py-4 md:px-8">
+          <div className="bg-white px-4 py-4 md:px-8">
             <div className="mx-auto max-w-3xl">
-              <div className="relative">
+              <div className="relative flex">
                 <textarea
+                  ref={textareaRef}
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={onComposerKeyDown}
+                  onChange={handleInputChange}
+                  onKeyDown={(e) => {
+                    onComposerKeyDown(e);
+                    requestAnimationFrame(() => resizeTextarea());
+                  }}
                   placeholder="Message"
                   rows={1}
-                  className="w-full resize-none rounded-2xl border border-zinc-200 bg-white px-4 py-3 pr-16 text-sm leading-relaxed outline-none focus:border-zinc-400"
-                  style={{ maxHeight: 400 }}
+                  className="w-full resize-none rounded-4xl border border-zinc-200 background-primary px-6 py-[18px] pr-20 text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
                 />
                 <button
                   onClick={sendMessage}
                   disabled={sending || !input.trim()}
-                  className="absolute bottom-2 right-2 rounded-xl bg-zinc-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+                  className="absolute right-2 bottom-2 h-12 px-4 rounded-full bg-zinc-900 text-base font-medium text-white flex items-center justify-center disabled:opacity-40"
                 >
-                  Send
+                  {sending ? <TypingIndicator /> : 'Send'}
                 </button>
               </div>
               <div className="mt-2 text-xs text-zinc-500">
