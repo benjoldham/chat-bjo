@@ -1,38 +1,66 @@
 import type { Schema } from '../../data/resource';
-import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
+import {
+  BedrockRuntimeClient,
+  ConverseCommand,
+  type ConverseCommandInput,
+} from '@aws-sdk/client-bedrock-runtime';
 
 const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 
+const MODEL_MAP: Record<string, string> = {
+  // Keep your current default:
+  claude_haiku: 'anthropic.claude-3-haiku-20240307-v1:0',
+  openai: 'openai.gpt-oss-120b-1:0',
+  deepseek: 'deepseek.v3.2',
+};
+
 export const handler: Schema['chat']['functionHandler'] = async (event) => {
-  const { prompt } = event.arguments;
+ const { prompt, modelKey, history } = event.arguments as {
+  prompt: string;
+  modelKey?: string;
+  history?: string;
+};
 
-  // Pick a model you have access to in Bedrock (we can change later).
-  // Common options: Anthropic Claude, Amazon Titan, etc.
-  const modelId = process.env.BEDROCK_MODEL_ID || 'anthropic.claude-3-haiku-20240307-v1:0';
+  const resolvedKey = modelKey && MODEL_MAP[modelKey] ? modelKey : 'claude_haiku';
+  const modelId = MODEL_MAP[resolvedKey];
+  console.log('modelKey:', modelKey, 'modelId:', modelId);
 
-  const body = JSON.stringify({
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 800,
-    temperature: 0.7,
-    messages: [
-      { role: 'user', content: prompt },
-    ],
-  });
+  let parsedHistory: Array<{ role: 'user' | 'assistant'; content: string }> | null = null;
+  if (history) {
+    try {
+      parsedHistory = JSON.parse(history);
+    } catch {
+      console.warn('Invalid history JSON, falling back to single prompt');
+    }
+  }
 
-  const resp = await client.send(
-    new InvokeModelCommand({
-      modelId,
-      contentType: 'application/json',
-      accept: 'application/json',
-      body: new TextEncoder().encode(body),
-    })
-  );
+  const input: ConverseCommandInput = {
+    modelId,
+    messages: parsedHistory
+      ? parsedHistory.map((m) => ({
+          role: m.role,
+          content: [{ text: m.content }],
+        }))
+      : [
+          {
+            role: 'user',
+            content: [{ text: prompt }],
+          },
+        ],
+    inferenceConfig: {
+      maxTokens: 800,
+      temperature: 0.7,
+    },
+  };
 
-  const json = JSON.parse(new TextDecoder().decode(resp.body));
+  const resp = await client.send(new ConverseCommand(input));
+
+  // Converse returns structured content blocks. Grab text blocks and join.
   const text =
-    json?.content?.map((c: any) => c?.text).filter(Boolean).join('') ??
-    json?.completion ??
-    '';
+    resp.output?.message?.content
+      ?.map((c) => ('text' in c ? c.text : ''))
+      .filter(Boolean)
+      .join('') ?? '';
 
   return { text };
 };
