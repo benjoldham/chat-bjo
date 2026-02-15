@@ -3,8 +3,9 @@ import { defineFunction } from '@aws-amplify/backend';
 export const chatFunction = defineFunction({
   name: 'chat',
   entry: './handler.ts',
+  timeoutSeconds: 60,
   environment: {
-    BEDROCK_MODEL_ID: 'anthropic.claude-3-haiku-20240307-v1:0',
+    DEFAULT_MODEL_KEY: 'claude_haiku',
   },
   permissions: [
     {
@@ -13,4 +14,3 @@ export const chatFunction = defineFunction({
     },
   ],
 });
-
