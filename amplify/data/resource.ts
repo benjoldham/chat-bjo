@@ -8,7 +8,10 @@ export const data = defineData({
       .query()
       .arguments({
         prompt: a.string().required(),
+        modelKey: a.string(), // optional
+        history: a.string(), // JSON string of prior turns
       })
+
       .returns(
         a.customType({
           text: a.string().required(),
@@ -21,6 +24,7 @@ export const data = defineData({
       .model({
         title: a.string().required(),
         createdAt: a.datetime().required(),
+        deletedAt: a.datetime(), // nullable = soft delete (cross-device)
       })
       .authorization((allow) => [allow.owner()]),
 
