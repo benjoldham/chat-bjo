@@ -86,6 +86,10 @@ button.sidebar.item-active{
 }
 
 .item-hover{
+  font-size:14px;
+}
+
+.item-hover:hover{
   background: var(--grey-200);
 }
 
