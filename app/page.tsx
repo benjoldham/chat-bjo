@@ -9,6 +9,7 @@ type Thread = {
   id: string;
   title: string;
   createdAt: string;
+  deletedAt?: string | null;
 };
 
 type Message = {
@@ -18,6 +19,72 @@ type Message = {
   content: string;
   createdAt: string;
 };
+
+type ChatTurn = { role: 'user' | 'assistant'; content: string };
+
+// Keep only the last N turns and strip empty assistant bubbles
+function buildHistoryForModel(allMessages: Message[], nextUserText: string, maxTurns = 20): ChatTurn[] {
+  const turns: ChatTurn[] = allMessages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim().length > 0)
+    .map((m) => ({ role: m.role, content: m.content }));
+
+  turns.push({ role: 'user', content: nextUserText });
+
+  // Keep last N turns (user+assistant pairs)
+  return turns.slice(-maxTurns);
+}
+
+type ModelOption = {
+  key: string;
+  name: string;
+  description: string;
+};
+
+const MODEL_OPTIONS: ModelOption[] = [
+  { key: 'openai', name: 'Open AI', description: 'Best for general questions' },
+  { key: 'claude_haiku', name: 'Claude Haiku 3.5', description: 'Best for coding' },
+  { key: 'deepseek', name: 'Deepseek', description: 'Best for other stuff' },
+];
+
+// ---- Token + pricing estimates (frontend) ----
+// NOTE: Update these numbers to match YOUR Bedrock price assumptions.
+// Values are "GBP per 1K tokens".
+const MODEL_PRICING_GBP: Record<
+  string,
+  { inputPer1K: number; outputPer1K: number }
+> = {
+  // DUMMY PLACEHOLDERS — replace with your real pricing
+  openai: { inputPer1K: 0.002, outputPer1K: 0.006 },
+  claude_haiku: { inputPer1K: 0.0005, outputPer1K: 0.0025 },
+  deepseek: { inputPer1K: 0.0008, outputPer1K: 0.002 },
+};
+
+// Rough token estimator (fast + works in browser)
+// Tokens are usually ~chars/4 in English; varies by model + language.
+function estimateTokens(text: string, modelKey: string) {
+  const t = text.trim();
+  if (!t) return 0;
+
+  // Small per-model tweaks (still estimates)
+  const chars = t.length;
+  const divisor =
+    modelKey === 'claude_haiku' ? 3.8 :
+    modelKey === 'deepseek' ? 4.2 :
+    4.0;
+
+  // Add a tiny overhead to better match typical prompt formatting
+  const base = Math.ceil(chars / divisor);
+  const overhead = 6;
+
+  return base + overhead;
+}
+
+function formatGBP(amount: number) {
+  // Keep it readable for tiny numbers
+  if (amount === 0) return '£0.00';
+  if (amount < 0.01) return `£${amount.toFixed(4)}`;
+  return `£${amount.toFixed(2)}`;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -55,6 +122,124 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [isSwitchingThread, setIsSwitchingThread] = useState(false);
+  const [selectedModelKey, setSelectedModelKey] = useState<string>('claude_haiku');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [threadModelKeys, setThreadModelKeys] = useState<Record<string, string>>({});
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+
+async function softDeleteChat(threadId: string) {
+  const ok = window.confirm('Delete this chat? (It will be hidden on all your devices.)');
+  if (!ok) return;
+
+  // Optimistic UI: remove immediately
+  setThreads((prev) => prev.filter((t) => t.id !== threadId));
+
+  // If active chat deleted, clear UI
+  if (activeThreadId === threadId) {
+    setActiveThreadId(null);
+    setMessages([]);
+  }
+
+  try {
+    await client.models.ChatThread.update({
+      id: threadId,
+      deletedAt: nowIso(),
+    } as any);
+
+    // Refresh list so it stays consistent
+    await loadThreads();
+  } catch (e) {
+    console.error(e);
+    alert('Failed to delete chat. Please refresh and try again.');
+    await loadThreads();
+  }
+}
+
+
+  function persistHiddenThreadIds(next: string[]) {
+    setHiddenThreadIds(next);
+    try {
+      localStorage.setItem('hiddenThreadIds', JSON.stringify(next));
+    } catch {}
+  }
+
+async function softDeleteChat(threadId: string) {
+  const ok = window.confirm('Delete this chat? (It will be hidden on all your devices.)');
+  if (!ok) return;
+
+  // Optimistic UI: remove immediately
+  setThreads((prev) => prev.filter((t) => t.id !== threadId));
+
+  // If active chat deleted, clear UI
+  if (activeThreadId === threadId) {
+    setActiveThreadId(null);
+    setMessages([]);
+  }
+
+  try {
+    await client.models.ChatThread.update({
+      id: threadId,
+      deletedAt: nowIso(),
+    } as any);
+
+    // Refresh list so it stays consistent
+    await loadThreads();
+  } catch (e) {
+    console.error(e);
+    alert('Failed to delete chat. Please refresh and try again.');
+    await loadThreads();
+  }
+}
+
+  async function copyMessageToClipboard(text: string, messageId: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMessageId(messageId);
+      window.setTimeout(() => setCopiedMessageId((prev) => (prev === messageId ? null : prev)), 1200);
+    } catch {
+      // Fallback (older browsers / permissions)
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+
+      setCopiedMessageId(messageId);
+      window.setTimeout(() => setCopiedMessageId((prev) => (prev === messageId ? null : prev)), 1200);
+    }
+  }
+
+  const lockedModelKey = activeThreadId ? threadModelKeys[activeThreadId] : undefined;
+  const effectiveModelKey = lockedModelKey ?? selectedModelKey;
+
+  const selectedModel = useMemo(
+    () => MODEL_OPTIONS.find((m) => m.key === effectiveModelKey) ?? MODEL_OPTIONS[0],
+    [effectiveModelKey]
+  );
+
+  const pricing = MODEL_PRICING_GBP[effectiveModelKey] ?? { inputPer1K: 0, outputPer1K: 0 };
+
+  const estimatedInputTokens = useMemo(
+    () => estimateTokens(input, effectiveModelKey),
+    [input, effectiveModelKey]
+  );
+
+  const estimatedInputCostGBP = useMemo(
+    () => (estimatedInputTokens / 1000) * pricing.inputPer1K,
+    [estimatedInputTokens, pricing.inputPer1K]
+  );
+
+  // Lock the model once there is at least one user message in the active thread
+  const isModelLocked = useMemo(() => {
+    if (!activeThreadId) return false;
+    if (threadModelKeys[activeThreadId]) return true;
+    return messages.some((m) => m.role === 'user');
+  }, [activeThreadId, threadModelKeys, messages]);
 
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -93,6 +278,26 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
     return () => mq.removeEventListener?.('change', apply);
   }, []);
 
+    useEffect(() => {
+    if (!activeThreadId) return;
+    const saved = localStorage.getItem(`threadModel:${activeThreadId}`);
+    if (saved && saved !== threadModelKeys[activeThreadId]) {
+      setThreadModelKeys((prev) => ({ ...prev, [activeThreadId]: saved }));
+    }
+  }, [activeThreadId, threadModelKeys]);
+
+  useEffect(() => {
+  function onDocMouseDown(e: MouseEvent) {
+    if (!modelMenuRef.current) return;
+    if (!modelMenuRef.current.contains(e.target as Node)) {
+      setModelMenuOpen(false);
+    }
+  }
+
+  document.addEventListener('mousedown', onDocMouseDown);
+  return () => document.removeEventListener('mousedown', onDocMouseDown);
+}, []);
+
   const filteredThreads = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return threads;
@@ -108,12 +313,16 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
       id: t.id,
       title: t.title,
       createdAt: t.createdAt,
+      deletedAt: t.deletedAt ?? null,
     })) as Thread[];
 
-    items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    setThreads(items);
 
-    if (!activeThreadId && items[0]) setActiveThreadId(items[0].id);
+    const visible = items.filter((t) => !t.deletedAt);
+
+    visible.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    setThreads(visible);
+
+    if (!activeThreadId && visible[0]) setActiveThreadId(visible[0].id);
   }
 
   async function loadMessages(threadId: string) {
@@ -202,6 +411,11 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
       setActiveThreadId(threadId);
       // Refresh sidebar
       await loadThreads();
+
+      // Lock model for this thread after first message (store locally)
+      setThreadModelKeys((prev) => ({ ...prev, [threadId!]: selectedModelKey }));
+      localStorage.setItem(`threadModel:${threadId!}`, selectedModelKey);
+
     }
 
     // Write user message
@@ -241,7 +455,14 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
 
     let assistantText = '';
     try {
-      const chatRes: any = await client.queries.chat({ prompt: text });
+      const history = JSON.stringify(buildHistoryForModel(messages, text, 20));
+
+      const chatRes: any = await client.queries.chat({
+        prompt: text,
+        modelKey: effectiveModelKey,
+        history,
+      });
+
 
       if (chatRes?.errors?.length) {
         const msg = chatRes.errors.map((e: any) => e.message).join(' | ');
@@ -338,24 +559,41 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
                 <div className="px-2.5 py-3 text-sm text-primary">No chats yet.</div>
               ) : (
                 <ul className="space-y-1">
-                  {filteredThreads.map((t) => (
+                                    {filteredThreads.map((t) => (
                     <li key={t.id}>
-                      <button
-                        onClick={() => {
-                          setActiveThreadId(t.id);
-
-                          // Close the sidebar on mobile so the chat is visible
-                          if (window.innerWidth < 768) setSidebarOpen(false);
-                        }}
+                      <div
                         className={[
-                          'w-full rounded-lg px-2.5 py-2 text-left text-sm tracking-tighter text-primary transition button sidebar',
-                          activeThreadId === t.id
-                            ? 'item-active'
-                            : 'item-hover',
+                          'group relative flex items-center rounded-lg transition',
+                          activeThreadId === t.id ? 'item-active' : 'item-hover',
                         ].join(' ')}
                       >
-                        {t.title}
-                      </button>
+                        <button
+                          onClick={() => {
+                            setActiveThreadId(t.id);
+
+                            // Close the sidebar on mobile so the chat is visible
+                            if (window.innerWidth < 768) setSidebarOpen(false);
+                          }}
+                          className="w-full rounded-lg px-2.5 py-2 pr-10 text-left text-sm tracking-tighter text-primary transition button sidebar">
+                          {t.title}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            softDeleteChat(t.id);
+                          }}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-sm text-zinc-500 opacity-0 transition hover:bg-zinc-200 group-hover:opacity-100"
+                          aria-label="Delete chat"
+                          title="Delete chat"
+                        >
+                          🗑
+                        </button>
+
+
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -383,7 +621,7 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
         )}
 
         {/* Main */}
-        <main className="flex h-full flex-1 flex-col">
+        <main className="relative flex h-full flex-1 flex-col">
           {/* Top bar (mobile sidebar toggle) */}
           <div className="flex items-center gap-2 border-b border-zinc-200 p-2 md:p-3 h-14">
             {!sidebarOpen && (
@@ -395,38 +633,110 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
                 ☰
               </button>
             )}
-            <div className="text-lg text-primary">
-              {activeThreadId ? 'Chat' : 'New chat'}
-            </div>
+              {/* Model selector */}
+              <div className="relative" ref={modelMenuRef}>
+                <button
+                  type="button"
+                  disabled={isModelLocked}
+                  onClick={() => { if (isModelLocked) return; setModelMenuOpen((v) => !v); }}
+                  className="mb-0 inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-900 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                  aria-expanded={modelMenuOpen}
+                >
+                  <span className="font-medium">{selectedModel.name}</span>
+                  <span className="text-zinc-500">∨</span>
+                </button>
+
+                {modelMenuOpen && !isModelLocked && (
+                  <div className="absolute left-0 top-11 w-80 rounded-2xl border border-zinc-200 bg-white shadow-lg p-2 z-20">
+                    {MODEL_OPTIONS.map((opt) => {
+                      const active = opt.key === selectedModelKey;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => {
+                            setSelectedModelKey(opt.key);
+                            setModelMenuOpen(false);
+                          }}
+                          className={[
+                            'w-full rounded-xl px-3 py-2 text-left hover:bg-zinc-50 transition',
+                            active ? 'bg-zinc-100' : '',
+                          ].join(' ')}
+                        >
+                          <div className="text-base text-zinc-900">{opt.name}</div>
+                          <div className="text-sm text-zinc-500">{opt.description}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              
           </div>
 
           {/* Messages */}
             <div
               className={[
-                "relative flex-1 overflow-y-auto px-4 py-6 md:px-8 transition-opacity duration-200 ease-out",
+                "relative flex-1 overflow-y-auto px-4 py-6 md:px-8 transition-opacity pb-40 duration-200 ease-out",
                 isSwitchingThread ? "opacity-40" : "opacity-100",
               ].join(" ")}
             >
             <div className="mx-auto max-w-3xl space-y-4">
+
               {messages.length === 0 ? (
                 <div className="text-sm text-zinc-500">
                   Start a new chat by typing below.
                 </div>
               ) : (
                 messages.map((m) => (
-                  <div key={m.id} className="w-full">
+                                    <div key={m.id} className="w-full">
                     {m.role === 'user' ? (
                       <div className="flex justify-end">
-                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
-                          {m.content}
+                        <div className="max-w-[85%] group">
+                          <div className="whitespace-pre-wrap rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
+                            {m.content}
+                          </div>
+
+                          {/* Actions (user) */}
+                          {!m.id.startsWith('typing-') && (
+                            <div className="mt-1 flex justify-end gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+
+                              <button
+                                type="button"
+                                onClick={() => copyMessageToClipboard(m.content, m.id)}
+                                className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
+                                aria-label="Copy message"
+                                title="Copy"
+                              >
+                                {copiedMessageId === m.id ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ) : (
-                    <div className="flex justify-start">
-                      <div className="max-w-[85%] whitespace-pre-wrap px-4 py-3 text-md leading-relaxed text-zinc-900">
-                        {m.id.startsWith('typing-') ? <TypingIndicator /> : m.content}
+                      <div className="flex justify-start">
+                        <div className="max-w-[85%] group">
+                          <div className="whitespace-pre-wrap px-4 py-3 text-md leading-relaxed text-zinc-900">
+                            {m.id.startsWith('typing-') ? <TypingIndicator /> : m.content}
+                          </div>
+
+                          {/* Actions (assistant) */}
+                          {!m.id.startsWith('typing-') && (
+                           <div className="mt-1 flex justify-start gap-1">
+                              <button
+                                type="button"
+                                onClick={() => copyMessageToClipboard(m.content, m.id)}
+                                className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
+                                aria-label="Copy message"
+                                title="Copy"
+                              >
+                                {copiedMessageId === m.id ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
                     )}
                   </div>
                 ))
@@ -438,31 +748,41 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
           </div>
 
           {/* Composer */}
-          <div className="bg-white px-4 py-4 md:px-8">
+          <div className="absolute bottom-0 left-0 right-0 z-30 p-4 md:p-6">
             <div className="mx-auto max-w-3xl">
-              <div className="relative flex">
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleInputChange}
-                  onKeyDown={(e) => {
-                    onComposerKeyDown(e);
-                    requestAnimationFrame(() => resizeTextarea());
-                  }}
-                  placeholder="Message"
-                  rows={1}
-                  className="w-full resize-none rounded-4xl border border-zinc-200 background-primary px-6 py-[18px] pr-20 text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={sending || !input.trim()}
-                  className="absolute right-2 bottom-2 h-12 px-4 rounded-full bg-zinc-900 text-base font-medium text-white flex items-center justify-center disabled:opacity-40"
-                >
-                  {sending ? <TypingIndicator /> : 'Send'}
-                </button>
-              </div>
-              <div className="mt-2 text-xs text-zinc-500">
-                Enter to send • Shift+Enter for a new line
+              <div className="relative">
+                <div className="relative flex">
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={handleInputChange}
+                    onKeyDown={(e) => {
+                      onComposerKeyDown(e);
+                      requestAnimationFrame(() => resizeTextarea());
+                    }}
+                    placeholder="Message"
+                    rows={1}
+                    className="w-full resize-none rounded-4xl border border-zinc-200 bg-white background-primary px-6 py-[18px] pr-20 text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={sending || !input.trim()}
+                    className="absolute right-2 bottom-2 h-12 px-4 rounded-full bg-zinc-900 text-base font-medium text-white flex items-center justify-center disabled:opacity-40"
+                  >
+                    {sending ? <TypingIndicator /> : 'Send'}
+                  </button>
+                </div>
+
+                {/* Token + cost estimate */}
+                <div className="mt-2 flex items-center justify-between px-2 text-xs text-zinc-500">
+                  <span>
+                    Est. {estimatedInputTokens.toLocaleString()} tokens
+                    <span className="ml-2 text-zinc-400">
+                      ({selectedModel.name}{isModelLocked ? '' : ''})
+                    </span>
+                  </span>
+                  <span>≈ {formatGBP(estimatedInputCostGBP)} input</span>
+                </div>
               </div>
             </div>
           </div>
