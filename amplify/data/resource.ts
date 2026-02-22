@@ -20,12 +20,13 @@ export const data = defineData({
       .authorization((allow) => [allow.authenticated()])
       .handler(a.handler.function(chatFunction)),
 
-    ChatThread: a
-      .model({
-        title: a.string().required(),
-        createdAt: a.datetime().required(),
-        deletedAt: a.datetime(), // nullable = soft delete (cross-device)
-      })
+      ChatThread: a
+        .model({
+          title: a.string().required(),
+          modelKey: a.string(), // optional for legacy compatibility
+          createdAt: a.datetime().required(),
+          deletedAt: a.datetime(), // nullable = soft delete (cross-device)
+        })
       .authorization((allow) => [allow.owner()]),
 
     ChatMessage: a
