@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +16,7 @@ import { client } from './lib/amplifyClient';
 type Thread = {
   id: string;
   title: string;
+  modelKey?: string | null;
   createdAt: string;
   deletedAt?: string | null;
 };
@@ -29,6 +30,15 @@ type Message = {
 };
 
 type ChatTurn = { role: 'user' | 'assistant'; content: string };
+
+type MonthlyUsage = {
+  monthLabel: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  totalCostUSD: number;
+  byModel: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+};
 
 const TRUNCATION_MARKER = '<!--__TRUNCATED__-->';
 const stripTruncationMarker = (s: string) => s.replace(TRUNCATION_MARKER, '').trimEnd();
@@ -53,23 +63,82 @@ type ModelOption = {
 };
 
 const MODEL_OPTIONS: ModelOption[] = [
-  { key: 'openai', name: 'Open AI', description: 'Best for general questions' },
-  { key: 'claude_haiku', name: 'Claude Haiku 3.5', description: 'Best for coding' },
-  { key: 'meta', name: 'Meta', description: 'Best open weight' },
+  { key: 'claude_haiku', name: 'Claude 3 Haiku', description: 'Best for everyday tasks' },
+  { key: 'google_gemma', name: 'Gemma 3 (Google)', description: 'Best for balanced reasoning' },
+  { key: 'openai', name: 'ChatGPT (OpenAI)', description: 'Best for writing and creative work' },
+  { key: 'meta', name: 'LLama 3 (Meta)', description: 'Best for logical and analytical tasks' },
+  { key: 'claude_sonnet', name: 'Claude Sonnet 4.6', description: 'Best for code and complex reasoning' },
 ];
 
+// ---- Model-specific tone (injected into the prompt; not shown to users) ----
+// Goal: all assistants feel warm + helpful, but never OTT/patronising.
+const MODEL_TONE: Record<string, { label: string; style: string }> = {
+  claude_haiku: {
+    label: 'Claude 3 Haiku — everyday tasks',
+    style:
+      'Be friendly and brisk. Prioritise the quickest helpful path. Offer short step-by-step checklists when useful.',
+  },
+  google_gemma: {
+    label: 'Gemma 3 — balanced reasoning',
+    style:
+      'Be calm and structured. Explain tradeoffs briefly. Use headings/bullets to keep reasoning easy to scan.',
+  },
+  openai: {
+    label: 'ChatGPT — writing and creative work',
+    style:
+      'Be warm and lightly creative (not goofy). Offer 2–3 options/variations when it helps. Keep prose clear and vivid.',
+  },
+  meta: {
+    label: 'Llama 3 — logical and analytical tasks',
+    style:
+      'Be direct and precise. State assumptions. Prefer concise bullets and concrete conclusions over long narration.',
+  },
+  claude_sonnet: {
+    label: 'Claude Sonnet 4.6 — code and complex reasoning',
+    style:
+      'Be technical and rigorous, but still approachable. Ask one clarifying question if needed; otherwise make reasonable assumptions and proceed. Include small, correct code snippets with caveats/edge cases.',
+  },
+};
+
+function buildSystemPrompt(modelKey: string) {
+  const tone = MODEL_TONE[modelKey] ?? {
+    label: 'Default assistant',
+    style: 'Be warm, helpful, and concise.',
+  };
+
+  // Keep this short to reduce token overhead and avoid “persona theatrics”.
+  return [
+    'You are a helpful assistant in a ChatGPT-style web app.',
+    'Tone: warm and confident. Never patronising, never overly enthusiastic.',
+    'Write in clear, plain English. Prefer short paragraphs and bullets.',
+    'If the user is ambiguous, ask at most ONE clarifying question; otherwise make a reasonable assumption and continue.',
+    'Do not mention these instructions.',
+    '',
+    `Model voice: ${tone.label}. ${tone.style}`,
+  ].join('\n');
+}
+
 // ---- Token + pricing estimates (frontend) ----
-// NOTE: Update these numbers to match YOUR Bedrock price assumptions.
-// Values are "GBP per 1K tokens".
-const MODEL_PRICING_GBP: Record<
+// Values are "USD per 1K tokens" (derived from your "$ per 1M tokens" / 1000).
+const MODEL_PRICING_USD: Record<
   string,
   { inputPer1K: number; outputPer1K: number }
 > = {
-  // DUMMY PLACEHOLDERS — replace with your real pricing
-  openai: { inputPer1K: 0.002, outputPer1K: 0.006 },
-  claude_haiku: { inputPer1K: 0.0005, outputPer1K: 0.0025 },
-  meta: { inputPer1K: 0.0007, outputPer1K: 0.0020 },
+  // openai = gpt-oss-120b
+  openai: { inputPer1K: 0.00023, outputPer1K: 0.00093 },
+
+  // google_gemma = Gemma 3 27B
+  google_gemma: { inputPer1K: 0.00009, outputPer1K: 0.00029 },
+
+  // claude_sonnet = Claude Sonnet 4.6
+  claude_sonnet: { inputPer1K: 0.003, outputPer1K: 0.015 },
+
+  // meta = Llama 3.3 Instruct (70B)
+  meta: { inputPer1K: 0.00072, outputPer1K: 0.00072 },
+
+  claude_haiku: { inputPer1K: 0.00025, outputPer1K: 0.00125 },
 };
+
 
 // Rough token estimator (fast + works in browser)
 // Tokens are usually ~chars/4 in English; varies by model + language.
@@ -81,6 +150,8 @@ function estimateTokens(text: string, modelKey: string) {
   const chars = t.length;
   const divisor =
     modelKey === 'claude_haiku' ? 3.8 :
+    modelKey === 'claude_sonnet' ? 3.9 :
+    modelKey === 'google_gemma' ? 4.1 :
     modelKey === 'meta' ? 4.1 :
     4.0;
 
@@ -91,15 +162,41 @@ function estimateTokens(text: string, modelKey: string) {
   return base + overhead;
 }
 
-function formatGBP(amount: number) {
-  // Keep it readable for tiny numbers
-  if (amount === 0) return '£0.00';
-  if (amount < 0.01) return `£${amount.toFixed(4)}`;
-  return `£${amount.toFixed(2)}`;
+// Input tokens should include the system tone prompt we inject on every request.
+function estimateInputTokens(text: string, modelKey: string) {
+  return estimateTokens(text, modelKey) + estimateTokens(buildSystemPrompt(modelKey), modelKey);
+}
+
+function formatUSD(amount: number) {
+  if (!Number.isFinite(amount) || amount <= 0) return '$0.000000';
+
+  // Keep the UI consistent and additive at micro values
+  if (amount < 1) return `$${amount.toFixed(6)}`;
+
+  // Larger totals can be normal money formatting
+  return `$${amount.toFixed(2)}`;
+}
+
+function estimateCostUSD(tokens: number, modelKey: string, kind: 'input' | 'output') {
+  const p = MODEL_PRICING_USD[modelKey] ?? { inputPer1K: 0, outputPer1K: 0 };
+  const per1K = kind === 'input' ? p.inputPer1K : p.outputPer1K;
+  return (tokens / 1000) * per1K;
 }
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function formatMsgTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  // Example: "22 Feb 08:14"
+  return d.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function titleFromFirstUserMessage(text: string) {
@@ -465,8 +562,8 @@ function MarkdownMessage({
         rehypePlugins={[rehypeRaw, rehypeKatex]}
         components={{
           // Headings / text
-          h1: ({ children }) => <h1 className="mt-6 mb-3 text-2xl font-semibold">{children}</h1>,
-          h2: ({ children }) => <h2 className="mt-5 mb-2 text-xl font-semibold">{children}</h2>,
+          h1: ({ children }) => <h1 className="mt-6 mb-4 text-2xl font-semibold">{children}</h1>,
+          h2: ({ children }) => <h2 className="mt-5 mb-4 text-xl font-semibold">{children}</h2>,
           h3: ({ children }) => <h3 className="mt-4 mb-2 text-lg font-semibold">{children}</h3>,
           p: ({ children }) => <p className="whitespace-pre-wrap leading-relaxed">{children}</p>,
           li: ({ children }) => <li className="leading-relaxed">{children}</li>,
@@ -491,6 +588,9 @@ function MarkdownMessage({
             <summary className="cursor-pointer select-none font-medium">
               {children}
             </summary>
+          ),
+          hr: () => (
+            <hr className="my-8 border-0 h-px bg-zinc-200" />
           ),
           table: ({ children }) => (
             <div className="overflow-x-auto rounded-xl border border-zinc-200">
@@ -589,6 +689,122 @@ function MarkdownMessage({
   );
 }
 
+function AnimatedMarkdownMessage({
+  id,
+  text,
+  onCopy,
+  isActive,
+  getScrollContainer,
+  getMessageEl,
+}: {
+  id: string;
+  text: string;
+  onCopy: (code: string) => void;
+  isActive: boolean;
+  getScrollContainer: () => HTMLDivElement | null;
+  getMessageEl: (id: string) => HTMLDivElement | null;
+}) {
+  const [visible, setVisible] = useState('');
+  const [done, setDone] = useState(false);
+  const desiredTopOffset = 16; // px
+  // Prevent the same message from re-animating on unrelated re-renders (e.g. clicking Copy).
+  const playedRef = useRef(false);
+  const lastIdRef = useRef<string | null>(null);
+  const lastTextRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    const full = text ?? '';
+    if (!full.trim()) {
+      setVisible(full);
+      setDone(true);
+      return;
+    }
+
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+    if (prefersReduced) {
+      setVisible(full);
+      setDone(true);
+      return;
+    }
+
+// If we've already animated this exact message, don't restart.
+if (playedRef.current && lastIdRef.current === id && lastTextRef.current === full) {
+  setVisible(full);
+  setDone(true);
+  return;
+}
+
+playedRef.current = false;
+lastIdRef.current = id;
+lastTextRef.current = full;
+
+setDone(false);
+setVisible('');
+
+let raf = 0;
+let last = performance.now();
+
+// Faster + smoother: reveal by words (not every character)
+const parts = full.match(/\S+\s*/g) ?? [full];
+let w = 0;
+const wps = 28; // words per second (tweak)
+
+
+    const keepAnchorInView = () => {
+      const scroller = getScrollContainer();
+      const el = getMessageEl(id);
+      if (!scroller || !el) return;
+
+      const scrollerRect = scroller.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const delta = elRect.top - (scrollerRect.top + desiredTopOffset);
+      if (Math.abs(delta) > 1) scroller.scrollTop += delta;
+    };
+
+    const tick = (t: number) => {
+      const dt = t - last;
+      last = t;
+
+      const step = Math.max(1, Math.floor((wps * dt) / 1000));
+        w = Math.min(parts.length, w + step);
+        setVisible(parts.slice(0, w).join(''));
+
+        if (w < parts.length) {
+          raf = requestAnimationFrame(tick);
+        } else {
+          playedRef.current = true;
+          setDone(true);
+        }
+
+    };
+
+    // Prime the scroll anchor before typing starts.
+    keepAnchorInView();
+    raf = requestAnimationFrame(tick);
+
+    return () => cancelAnimationFrame(raf);
+  }, [id, isActive, text, getScrollContainer, getMessageEl]);
+
+  // If this message is not the "currently animating" one,
+  // render it normally so history doesn't disappear.
+  if (!isActive) {
+    return <MarkdownMessage text={text} onCopy={onCopy} />;
+  }
+
+  return (
+    <div className={done ? '' : 'animate-pulse'}>
+      <MarkdownMessage text={done ? text : visible} onCopy={onCopy} />
+      {!done && <span className="typing-caret" aria-hidden />}
+    </div>
+  );
+
+}
+
 export default function Home() {
   return (
     <Authenticator>
@@ -610,6 +826,8 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [threadModelKeys, setThreadModelKeys] = useState<Record<string, string>>({});
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const [monthlyUsage, setMonthlyUsage] = useState<MonthlyUsage | null>(null);
+  const [monthlyTotalsOpenMobile, setMonthlyTotalsOpenMobile] = useState(false);
 
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
@@ -706,17 +924,33 @@ async function softDeleteChat(threadId: string) {
     [effectiveModelKey]
   );
 
-  const pricing = MODEL_PRICING_GBP[effectiveModelKey] ?? { inputPer1K: 0, outputPer1K: 0 };
+  const pricing = MODEL_PRICING_USD[effectiveModelKey] ?? { inputPer1K: 0, outputPer1K: 0 };
 
   const estimatedInputTokens = useMemo(
     () => estimateTokens(input, effectiveModelKey),
     [input, effectiveModelKey]
   );
 
-  const estimatedInputCostGBP = useMemo(
+  const estimatedInputCostUSD = useMemo(
     () => (estimatedInputTokens / 1000) * pricing.inputPer1K,
     [estimatedInputTokens, pricing.inputPer1K]
   );
+
+    const { chatTotalTokens, chatTotalCostUSD } = useMemo(() => {
+    let totalTokens = 0;
+    let totalCost = 0;
+
+    for (const m of messages) {
+      const text = stripTruncationMarker(m.content);
+      const t = estimateTokens(text, effectiveModelKey);
+      totalTokens += t;
+
+      const kind = m.role === 'user' ? 'input' : 'output';
+      totalCost += estimateCostUSD(t, effectiveModelKey, kind);
+    }
+
+    return { chatTotalTokens: totalTokens, chatTotalCostUSD: totalCost };
+  }, [messages, effectiveModelKey]);
 
   // Lock the model once there is at least one user message in the active thread
   const isModelLocked = useMemo(() => {
@@ -727,6 +961,15 @@ async function softDeleteChat(threadId: string) {
 
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // Message scroll + anchor refs (for smooth assistant reveal)
+const scrollRef = useRef<HTMLDivElement | null>(null);
+const messageElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+const seenAssistantIdsRef = useRef<Set<string>>(new Set());
+const [animatingAssistantId, setAnimatingAssistantId] = useState<string | null>(null);
+// Stable callbacks so the typing effect doesn't restart on unrelated re-renders (e.g. Copy state changes)
+const getScrollContainer = useCallback(() => scrollRef.current, []);
+const getMessageEl = useCallback((id: string) => messageElsRef.current.get(id) ?? null, []);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -744,9 +987,36 @@ async function softDeleteChat(threadId: string) {
     }
 
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+// When a new assistant message arrives, scroll so the *start* of the message
+// is in the viewport (like ChatGPT), then animate its appearance.
+useEffect(() => {
+  // Keep this only for cases where messages arrive from elsewhere (e.g. another device)
+  // and we are NOT currently animating a message.
+  if (animatingAssistantId) return;
+
+  const lastAssistant = [...messages]
+    .reverse()
+    .find((m) => m.role === 'assistant' && !m.id.startsWith('typing-') && m.content.trim().length > 0);
+
+  if (!lastAssistant) return;
+  if (seenAssistantIdsRef.current.has(lastAssistant.id)) return;
+
+  seenAssistantIdsRef.current.add(lastAssistant.id);
+  setAnimatingAssistantId(lastAssistant.id);
+
+  requestAnimationFrame(() => {
+    const scroller = scrollRef.current;
+    const el = messageElsRef.current.get(lastAssistant.id);
+    if (!scroller || !el) return;
+
+    const desiredTopOffset = 16;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    scroller.scrollTop += elRect.top - (scrollerRect.top + desiredTopOffset);
+  });
+}, [messages, animatingAssistantId]);
+
+
 
   // Sidebar: collapsed by default on <768px, open by default on >=768px
   useEffect(() => {
@@ -762,13 +1032,7 @@ async function softDeleteChat(threadId: string) {
     return () => mq.removeEventListener?.('change', apply);
   }, []);
 
-    useEffect(() => {
-    if (!activeThreadId) return;
-    const saved = localStorage.getItem(`threadModel:${activeThreadId}`);
-    if (saved && saved !== threadModelKeys[activeThreadId]) {
-      setThreadModelKeys((prev) => ({ ...prev, [activeThreadId]: saved }));
-    }
-  }, [activeThreadId, threadModelKeys]);
+// No localStorage thread model sync — modelKey comes from ChatThread.modelKey (cross-device)
 
   useEffect(() => {
   function onDocMouseDown(e: MouseEvent) {
@@ -793,37 +1057,145 @@ async function softDeleteChat(threadId: string) {
       // newest first (best-effort; if sort not supported, we’ll sort locally)
     });
 
-    const items = (res.data ?? []).map((t: any) => ({
-      id: t.id,
-      title: t.title,
-      createdAt: t.createdAt,
-      deletedAt: t.deletedAt ?? null,
-    })) as Thread[];
+const items = (res.data ?? [])
+  .filter((t: any) => t && t.id)
+  .map((t: any) => ({
+    id: t.id,
+    title: t.title ?? 'Untitled',
+    modelKey: t.modelKey ?? null,
+    createdAt: t.createdAt,
+    deletedAt: t.deletedAt ?? null,
+  })) as Thread[];
 
 
-    const visible = items.filter((t) => !t.deletedAt);
+    const visible = items.filter((t) => !t.deletedAt && !!t.modelKey);
 
     visible.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     setThreads(visible);
+    void loadMonthlyUsageForCurrentMonth(visible);
 
-    if (!activeThreadId && visible[0]) setActiveThreadId(visible[0].id);
+    // Seed per-thread model keys from the backend (source of truth)
+setThreadModelKeys((prev) => {
+  const next = { ...prev };
+  for (const t of visible) {
+    if (t.modelKey) next[t.id] = t.modelKey;
+  }
+  return next;
+});
+
+// Keep localStorage in sync so older logic still works
+for (const t of visible) {
+  if (t.modelKey) localStorage.setItem(`threadModel:${t.id}`, t.modelKey);
+}
+
+    // If activeThreadId is missing/invalid (e.g., thread was deleted or inaccessible), fall back.
+const activeStillExists = activeThreadId
+  ? visible.some((t) => t.id === activeThreadId)
+  : false;
+
+if (!activeThreadId || !activeStillExists) {
+  setActiveThreadId(visible[0]?.id ?? null);
+  if (!visible[0]) setMessages([]);
+}
+
   }
 
-  async function loadMessages(threadId: string) {
+  async function loadMonthlyUsageForCurrentMonth(threadsInSidebar: Thread[]) {
+  // Only threads with modelKey are in the sidebar already, but we guard anyway.
+  const threadKeyById: Record<string, string> = {};
+  for (const t of threadsInSidebar) {
+    if (t.modelKey) threadKeyById[t.id] = t.modelKey;
+  }
+  const allowedThreadIds = new Set(Object.keys(threadKeyById));
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStartIso = monthStart.toISOString();
+
+  const monthLabel = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalCostUSD = 0;
+
+  const byModel: MonthlyUsage['byModel'] = {};
+
+  // Basic pagination (Amplify list often returns nextToken)
+  let nextToken: string | null | undefined = undefined;
+
+  while (true) {
+    const res: any = await client.models.ChatMessage.list({
+      filter: { createdAt: { ge: monthStartIso } },
+      ...(nextToken ? { nextToken } : {}),
+    });
+
+    const rows: any[] = (res.data ?? []).filter((m: any) => m && m.id && m.threadId);
+
+for (const m of rows) {
+  // Only count messages that belong to threads we actually show (modelKey threads)
+  if (!allowedThreadIds.has(m.threadId)) continue;
+
+  const mk = threadKeyById[m.threadId]!;
+  const text = stripTruncationMarker(String(m.content ?? ''));
+  const t = estimateTokens(text, mk);
+
+  if (!byModel[mk]) byModel[mk] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
+
+  if (m.role === 'user') {
+    inputTokens += t;
+    byModel[mk].inputTokens += t;
+    const c = estimateCostUSD(t, mk, 'input');
+    totalCostUSD += c;
+    byModel[mk].costUSD += c;
+  } else {
+    outputTokens += t;
+    byModel[mk].outputTokens += t;
+    const c = estimateCostUSD(t, mk, 'output');
+    totalCostUSD += c;
+    byModel[mk].costUSD += c;
+  }
+}
+
+    nextToken = res.nextToken ?? null;
+    if (!nextToken) break;
+  }
+
+  setMonthlyUsage({
+    monthLabel,
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    totalCostUSD,
+    byModel,
+  });
+}
+
+  async function loadMessages(threadId: string, seedSeenAssistantIds = false) {
     const res = await client.models.ChatMessage.list({
       filter: { threadId: { eq: threadId } },
     });
 
-    const items = (res.data ?? []).map((m: any) => ({
-      id: m.id,
-      threadId: m.threadId,
-      role: m.role,
-      content: m.content,
-      createdAt: m.createdAt,
-    })) as Message[];
+const items = (res.data ?? [])
+  .filter((m: any) => m && m.id) // <-- IMPORTANT
+  .map((m: any) => ({
+    id: m.id,
+    threadId: m.threadId,
+    role: m.role,
+    content: m.content,
+    createdAt: m.createdAt,
+  })) as Message[];
 
     items.sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
     setMessages(items);
+
+    // When loading an existing thread, don't re-animate historical assistant replies.
+    if (seedSeenAssistantIds) {
+      seenAssistantIdsRef.current = new Set(
+        items
+          .filter((m) => m.role === 'assistant' && !m.id.startsWith('typing-') && m.content.trim().length > 0)
+          .map((m) => m.id)
+      );
+      setAnimatingAssistantId(null);
+    }
   }
 
     async function newChat() {
@@ -848,8 +1220,9 @@ async function softDeleteChat(threadId: string) {
       setIsSwitchingThread(true);
 
       if (activeThreadId) {
-        await loadMessages(activeThreadId);
-      } else {
+      await loadMessages(activeThreadId, true);
+      }
+       else {
         setMessages([]);
       }
 
@@ -880,10 +1253,12 @@ async function softDeleteChat(threadId: string) {
 
     // Create thread on first message
     if (!threadId) {
-      const createThread = await client.models.ChatThread.create({
-        title: 'New chat',
-        createdAt: nowIso(),
-      });
+      const threadCreatedAt = nowIso();
+const createThread = await client.models.ChatThread.create({
+  title: 'New chat',
+  modelKey: selectedModelKey,
+  createdAt: threadCreatedAt,
+});
 
 
       threadId = createThread.data?.id ?? null;
@@ -897,9 +1272,8 @@ async function softDeleteChat(threadId: string) {
       // Refresh sidebar
       await loadThreads();
 
-      // Lock model for this thread after first message (store locally)
+      // Lock model for this thread after first message (in-memory only; source of truth is DB modelKey)
       setThreadModelKeys((prev) => ({ ...prev, [threadId!]: selectedModelKey }));
-      localStorage.setItem(`threadModel:${threadId!}`, selectedModelKey);
 
       // Fire-and-forget so it doesn't slow down the first response.
       // IMPORTANT: capture values NOW to avoid async drift (text/threadId/model changing later)
@@ -940,12 +1314,13 @@ async function softDeleteChat(threadId: string) {
     }
 
     // Write user message
-    const userMsg = await client.models.ChatMessage.create({
-      threadId,
-      role: 'user',
-      content: text,
-      createdAt: nowIso(),
-    });
+    const userCreatedAt = nowIso();
+const userMsg = await client.models.ChatMessage.create({
+  threadId,
+  role: 'user',
+  content: text,
+  createdAt: userCreatedAt,
+});
 
     const userMsgId = userMsg.data?.id ?? crypto.randomUUID();
 
@@ -957,29 +1332,35 @@ async function softDeleteChat(threadId: string) {
         threadId,
         role: 'user',
         content: text,
-        createdAt: nowIso(),
+        createdAt: userCreatedAt,
       },
     ]);
 
     // Add a temporary "thinking" assistant bubble immediately
     const typingId = `typing-${Date.now()}`;
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: typingId,
-        threadId,
-        role: 'assistant',
-        content: '',
-        createdAt: nowIso(),
-      },
-    ]);
+    const typingCreatedAt = nowIso();
+setMessages((prev) => [
+  ...prev,
+  {
+    id: typingId,
+    threadId,
+    role: 'assistant',
+    content: '',
+    createdAt: typingCreatedAt,
+  },
+]);
 
     let assistantText = '';
     try {
       const history = JSON.stringify(buildHistoryForModel(messages, text, 20));
 
+      // Inject a short system prompt that sets a warm baseline + model-specific tone.
+      // We keep the UI/DB message as the user's raw text; only the model sees this wrapper.
+      const systemPrompt = buildSystemPrompt(effectiveModelKey);
+      const composedPrompt = `${systemPrompt}\n\nUser message:\n${text}`;
+
       const chatRes: any = await client.queries.chat({
-        prompt: text,
+        prompt: composedPrompt,
         modelKey: effectiveModelKey,
         history,
       });
@@ -1010,18 +1391,47 @@ async function softDeleteChat(threadId: string) {
       assistantText = `Error calling chat(): ${e?.message ?? String(e)}`;
     }
 
-    await client.models.ChatMessage.create({
-      threadId,
-      role: 'assistant',
-      content: assistantText,
-      createdAt: nowIso(),
-    });
+  const assistantCreatedAt = nowIso();
+const assistantMsg = await client.models.ChatMessage.create({
+  threadId,
+  role: 'assistant',
+  content: assistantText,
+  createdAt: assistantCreatedAt,
+});
 
-    // Remove the temporary typing bubble
-    setMessages((prev) => prev.filter((m) => m.id !== typingId));
+  const assistantMsgId = assistantMsg.data?.id ?? crypto.randomUUID();
 
-    // Reload messages to keep consistent ordering/ids
-    await loadMessages(threadId);
+  // Mark seen + start anim BEFORE the message is rendered to avoid a 1-frame flash
+  seenAssistantIdsRef.current.add(assistantMsgId);
+  setAnimatingAssistantId(assistantMsgId);
+
+  // Replace the temporary typing bubble with the real assistant message
+  const createdAt = nowIso();
+  setMessages((prev) => [
+  ...prev.filter((m) => m.id !== typingId),
+  {
+    id: assistantMsgId,
+    threadId,
+    role: 'assistant',
+    content: assistantText,
+    createdAt: assistantCreatedAt,
+  },
+]);
+
+  // Scroll so the start of the assistant message is in view (once), but allow user scrolling after
+  requestAnimationFrame(() => {
+    const scroller = scrollRef.current;
+    const el = messageElsRef.current.get(assistantMsgId);
+    if (!scroller || !el) return;
+
+    const desiredTopOffset = 16;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    scroller.scrollTop += elRect.top - (scrollerRect.top + desiredTopOffset);
+  });
+
+  // Refresh monthly totals (best-effort)
+void loadThreads(); // threads include modelKey + we compute totals from that
 
     setSending(false);
   }
@@ -1133,6 +1543,61 @@ async function softDeleteChat(threadId: string) {
               )}
             </div>
 
+            <div id="monthlyTotals" className="px-3 pb-2">
+              <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                <button
+                  type="button"
+                  onClick={() => setMonthlyTotalsOpenMobile((v) => !v)}
+                  className="flex w-full items-center justify-between text-left"
+                  aria-expanded={monthlyTotalsOpenMobile}
+                >
+                  <span className="text-sm font-medium text-zinc-900 tracking-tighter">This month</span>
+                  <span className="text-xs text-zinc-500 md:hidden">
+                    {monthlyTotalsOpenMobile ? 'Hide' : 'Show'}
+                  </span>
+                </button>
+
+                {/* Collapsed on mobile, always shown on md+ */}
+                <div className={`mt-2 ${monthlyTotalsOpenMobile ? 'block' : 'hidden'} md:block`}>
+                  {!monthlyUsage ? (
+                    <div className="text-sm text-zinc-600">Calculating…</div>
+                  ) : (
+                    <div className="space-y-1 text-sm text-zinc-700">
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-600">{monthlyUsage.monthLabel}</span>
+                        <span className="font-medium">{formatUSD(monthlyUsage.totalCostUSD)}</span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-600">Input tokens</span>
+                        <span>{monthlyUsage.inputTokens.toLocaleString()}</span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-600">Output tokens</span>
+                        <span>{monthlyUsage.outputTokens.toLocaleString()}</span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-600">Total tokens</span>
+                        <span>{monthlyUsage.totalTokens.toLocaleString()}</span>
+                      </div>
+
+                      {/* Optional: tiny per-model breakdown */}
+                      <div className="mt-2 border-t border-zinc-100 pt-2 space-y-1">
+                        {Object.entries(monthlyUsage.byModel).map(([mk, v]) => (
+                          <div key={mk} className="flex items-center justify-between text-xs text-zinc-600">
+                            <span className="truncate">{MODEL_OPTIONS.find((m) => m.key === mk)?.name ?? mk}</span>
+                            <span>{formatUSD(v.costUSD)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <div className="border-t border-zinc-200 p-3">
               <button
                 onClick={onSignOut}
@@ -1204,11 +1669,22 @@ async function softDeleteChat(threadId: string) {
                   </div>
                 )}
               </div>
-              
+
+              {/* Chat totals (top right) */}
+              <div className="ml-auto flex items-center gap-3 text-xs text-zinc-500">
+                <span
+                  title="Total tokens and estimated total cost (input + output)"
+                  className="select-none"
+                >
+                  ≈ {chatTotalTokens.toLocaleString()} tok • {formatUSD(chatTotalCostUSD)}
+                </span>
+              </div>
+
           </div>
 
           {/* Messages */}
             <div
+              ref={scrollRef}
               className={[
                 "relative flex-1 overflow-y-auto px-4 py-6 md:px-8 transition-opacity pb-40 duration-200 ease-out",
                 isSwitchingThread ? "opacity-40" : "opacity-100",
@@ -1222,7 +1698,17 @@ async function softDeleteChat(threadId: string) {
                 </div>
               ) : (
                 messages.map((m, idx) => (
-                                    <div key={m.id} className="w-full">
+
+                  <div key={m.id}
+                    className="w-full"
+                    ref={(el) => {
+                      if (!el) {
+                        messageElsRef.current.delete(m.id);
+                        return;
+                      }
+                      messageElsRef.current.set(m.id, el);
+                    }}
+                  >
                     {m.role === 'user' ? (
                       <div className="flex justify-end">
                         <div className="max-w-[85%] group">
@@ -1232,7 +1718,25 @@ async function softDeleteChat(threadId: string) {
 
                           {/* Actions (user) */}
                           {!m.id.startsWith('typing-') && (
-                            <div className="mt-1 flex justify-end gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+
+                            <div className="mt-1 flex justify-end items-center gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+                              <span
+                                className="px-2 py-1 text-xs text-zinc-400 select-none"
+                                title="Approx. tokens and estimated input cost"
+                              >
+                                {(() => {
+                                  const t = estimateInputTokens(stripTruncationMarker(m.content), effectiveModelKey);
+                                  const c = estimateCostUSD(t, effectiveModelKey, 'input');
+                                  return `${t.toLocaleString()} tok • ${formatUSD(c)}`;
+                                })()}
+                              </span>
+
+                              <span
+                                className="px-2 py-1 text-xs text-zinc-400 select-none"
+                                title={new Date(m.createdAt).toLocaleString()}
+                              >
+                                {formatMsgTime(m.createdAt)}
+                              </span>
 
                               <button
                                 type="button"
@@ -1270,29 +1774,52 @@ async function softDeleteChat(threadId: string) {
                       <div className="flex justify-start">
                         <div className="max-w-[85%] group">
 
-                          <div className="px-4 py-3 text-md leading-relaxed text-zinc-900">
+                          <div className="py-3 text-md leading-relaxed text-zinc-900">
                             {m.id.startsWith('typing-') ? (
                               <TypingIndicator />
                             ) : (
-                            <MarkdownMessage
-                              text={stripTruncationMarker(m.content)}
-                              onCopy={(code) => copyMessageToClipboard(code, `${m.id}-code`)}
-                            />
+                              <AnimatedMarkdownMessage
+                                id={m.id}
+                                text={stripTruncationMarker(m.content)}
+                                onCopy={(code) => copyMessageToClipboard(code, `${m.id}-code`)}
+                                isActive={m.id === animatingAssistantId}
+                                getScrollContainer={getScrollContainer}
+                                getMessageEl={getMessageEl}
+                              />
                             )}
                           </div>
 
                           {/* Actions (assistant) */}
                           {!m.id.startsWith('typing-') && (
-                            <div className="mt-1 flex justify-start gap-1">
-                              <button
-                                type="button"
-                                onClick={() => copyMessageToClipboard(stripTruncationMarker(m.content), m.id)}
-                                className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
-                                aria-label="Copy message"
-                                title="Copy"
-                              >
-                                {copiedMessageId === m.id ? 'Copied' : 'Copy'}
-                              </button>
+
+                          <div className="mt-1 flex justify-start items-center gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() => copyMessageToClipboard(stripTruncationMarker(m.content), m.id)}
+                              className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
+                              aria-label="Copy message"
+                              title="Copy"
+                            >
+                              {copiedMessageId === m.id ? 'Copied' : 'Copy'}
+                            </button>
+
+                            <span
+                              className="px-2 py-1 text-xs text-zinc-400 select-none"
+                              title="Approx. tokens and estimated input cost"
+                            >
+                              {(() => {
+                                const t = estimateTokens(stripTruncationMarker(m.content), effectiveModelKey);
+                                const c = estimateCostUSD(t, effectiveModelKey, 'output');
+                                return `${t.toLocaleString()} tok • ${formatUSD(c)}`;
+                              })()}
+                            </span>
+
+                            <span
+                            className="px-2 py-1 text-xs text-zinc-400 select-none"
+                            title={new Date(m.createdAt).toLocaleString()}
+                          >
+                            {formatMsgTime(m.createdAt)}
+                          </span>
 
                               {m.role === 'assistant' && idx === messages.length - 1 && hasTruncationMarker(m.content) && (
                                 <button
@@ -1357,7 +1884,7 @@ async function softDeleteChat(threadId: string) {
                       ({selectedModel.name}{isModelLocked ? '' : ''})
                     </span>
                   </span>
-                  <span>≈ {formatGBP(estimatedInputCostGBP)} input</span>
+                  <span>≈ {formatUSD(estimatedInputCostUSD)} input</span>
                 </div>
               </div>
             </div>
