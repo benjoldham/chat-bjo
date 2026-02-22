@@ -10,15 +10,19 @@ const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 const MODEL_MAP: Record<string, string> = {
   // Keep your current default:
   claude_haiku: 'anthropic.claude-3-haiku-20240307-v1:0',
+  claude_sonnet: 'global.anthropic.claude-sonnet-4-6',
+  google_gemma: 'google.gemma-3-12b-it',
   openai: 'openai.gpt-oss-120b-1:0',
-  meta: 'us.meta.llama3-1-70b-instruct-v1:0',
+  meta: 'meta.llama3-70b-instruct-v1:0',
 };
 
 // Output token limits (tune for cost + UX). Can be overridden by env DEFAULT_MAX_OUTPUT_TOKENS.
 const MAX_TOKENS_BY_MODELKEY: Record<string, number> = {
   claude_haiku: 2500,
+  claude_sonnet: 2500,
+  google_gemma: 2500,
   openai: 2500,
-  meta: 2500,
+  meta: 2048,
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.DEFAULT_MAX_OUTPUT_TOKENS ?? 2500);
