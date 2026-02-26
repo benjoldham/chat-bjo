@@ -12,6 +12,9 @@ import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Authenticator } from '@aws-amplify/ui-react';
 // import '@aws-amplify/ui-react/styles.css';
 import { client } from './lib/amplifyClient';
+import Sidebar from './components/Sidebar';
+import ChatHeader from './components/ChatHeader';
+import MessageList from './components/MessageList';
 
 type Thread = {
   id: string;
@@ -579,6 +582,7 @@ function MarkdownMessage({
               {children}
             </a>
           ),
+          strong: ({ children }) => (<strong className="font-semibold">{children}</strong> ),
           details: ({ children }) => (
             <details className="rounded-xl border border-zinc-200 bg-white p-3">
               {children}
@@ -1446,409 +1450,74 @@ void loadThreads(); // threads include modelKey + we compute totals from that
   return (
     <div className="h-dvh w-full bg-white text-zinc-900">
       <div className="flex h-full">
-        {/* Sidebar */}
-        <aside
-          className={[
-            // Base
-            'h-full bg-secondary overflow-hidden',
 
-            // Mobile: drawer overlay
-            'fixed inset-y-0 left-0 z-50 w-72 transition-transform duration-200',
-            sidebarOpen ? 'translate-x-0' : '-translate-x-full',
-            'border-r border-zinc-200',
-
-            // Desktop (md+): in-layout sidebar that pushes content (your current behavior)
-            'md:static md:z-auto md:translate-x-0 md:transition-all md:duration-200',
-            sidebarOpen ? 'md:w-72 md:border-r md:border-zinc-200' : 'md:w-0 md:border-r-0',
-          ].join(' ')}
-        >
-          <div className={sidebarOpen ? 'flex h-full flex-col gap-8' : 'hidden'}>
-            <div className="flex items-center justify-between py-3 px-5 h-14 border-b border-zinc-200">
-              <div className="text-lg font-regular text-primary tracking-tighter">ChatBot</div>
-              <button onClick={() => setSidebarOpen(false)} className="rounded-md px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-200" aria-label="Collapse sidebar">
-                ◀
-              </button>
-            </div>
-
-            <div id="getStarted" className="flex flex-col p-2.5 gap-2">
-
-              <div className="text-sm px-2.5 font-regular text-secondary tracking-tighter">Get started</div>
-
-              <ul className="space-y-1">
-                <li className="mb-0">
-                  <button
-                    onClick={newChat}
-                    className="w-full rounded-lg px-2.5 py-2  text-sm font-regular text-primary text-left tracking-tighter button sidebar transition"
-                  >
-                    New chat
-                  </button>
-                </li>
-
-                <li className="">
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search chat"
-                    className="w-full rounded-lg px-2.5 py-2 text-sm font-regular tracking-tighter text-primary text-left outline-none focus:border-zinc-400"
-                  />
-                </li>
-              </ul>
-
-            </div>
-
-            <div id="chatHistory" className="flex flex-col flex-1 overflow-y-auto px-2 pb-2 gap-2">
-              <div className="text-sm font-regular text-secondary tracking-tighter px-2.5">Your chats</div>
-              {filteredThreads.length === 0 ? (
-                <div className="px-2.5 py-3 text-sm text-primary">No chats yet.</div>
-              ) : (
-                <ul className="space-y-1">
-                                    {filteredThreads.map((t) => (
-                    <li key={t.id}>
-                      <div
-                        className={[
-                          'group relative flex items-center rounded-lg transition',
-                          activeThreadId === t.id ? 'item-active' : 'item-hover',
-                        ].join(' ')}
-                      >
-                        <button
-                          onClick={() => {
-                            setActiveThreadId(t.id);
-
-                            // Close the sidebar on mobile so the chat is visible
-                            if (window.innerWidth < 768) setSidebarOpen(false);
-                          }}
-                          className="w-full rounded-lg px-2.5 py-2 pr-10 text-left text-sm tracking-tighter text-primary transition button sidebar truncate whitespace-nowrap overflow-hidden text-ellipsis">
-                            {t.title}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            softDeleteChat(t.id);
-                          }}
-                          className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-sm text-zinc-500 opacity-0 transition hover:bg-zinc-200 group-hover:opacity-100"
-                          aria-label="Delete chat"
-                          title="Delete chat"
-                        >
-                          🗑
-                        </button>
-
-
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <div id="monthlyTotals" className="px-3 pb-2">
-              <div className="rounded-xl border border-zinc-200 bg-white p-3">
-                <button
-                  type="button"
-                  onClick={() => setMonthlyTotalsOpenMobile((v) => !v)}
-                  className="flex w-full items-center justify-between text-left"
-                  aria-expanded={monthlyTotalsOpenMobile}
-                >
-                  <span className="text-sm font-medium text-zinc-900 tracking-tighter">This month</span>
-                  <span className="text-xs text-zinc-500 md:hidden">
-                    {monthlyTotalsOpenMobile ? 'Hide' : 'Show'}
-                  </span>
-                </button>
-
-                {/* Collapsed on mobile, always shown on md+ */}
-                <div className={`mt-2 ${monthlyTotalsOpenMobile ? 'block' : 'hidden'} md:block`}>
-                  {!monthlyUsage ? (
-                    <div className="text-sm text-zinc-600">Calculating…</div>
-                  ) : (
-                    <div className="space-y-1 text-sm text-zinc-700">
-                      <div className="flex items-center justify-between">
-                        <span className="text-zinc-600">{monthlyUsage.monthLabel}</span>
-                        <span className="font-medium">{formatUSD(monthlyUsage.totalCostUSD)}</span>
-                      </div>
-
-                      <div className="flex items-center justify-between">
-                        <span className="text-zinc-600">Input tokens</span>
-                        <span>{monthlyUsage.inputTokens.toLocaleString()}</span>
-                      </div>
-
-                      <div className="flex items-center justify-between">
-                        <span className="text-zinc-600">Output tokens</span>
-                        <span>{monthlyUsage.outputTokens.toLocaleString()}</span>
-                      </div>
-
-                      <div className="flex items-center justify-between">
-                        <span className="text-zinc-600">Total tokens</span>
-                        <span>{monthlyUsage.totalTokens.toLocaleString()}</span>
-                      </div>
-
-                      {/* Optional: tiny per-model breakdown */}
-                      <div className="mt-2 border-t border-zinc-100 pt-2 space-y-1">
-                        {Object.entries(monthlyUsage.byModel).map(([mk, v]) => (
-                          <div key={mk} className="flex items-center justify-between text-xs text-zinc-600">
-                            <span className="truncate">{MODEL_OPTIONS.find((m) => m.key === mk)?.name ?? mk}</span>
-                            <span>{formatUSD(v.costUSD)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t border-zinc-200 p-3">
-              <button
-                onClick={onSignOut}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100"
-              >
-                Sign out
-              </button>
-            </div>
-          </div>
-        </aside>
-
-        {/* Mobile backdrop when sidebar is open */}
-        {sidebarOpen && (
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="fixed inset-0 z-40 bg-black/30 md:hidden"
-            aria-label="Close sidebar"
-          />
-        )}
+        <Sidebar
+          sidebarOpen={sidebarOpen}
+          setSidebarOpen={setSidebarOpen}
+          newChat={newChat}
+          query={query}
+          setQuery={setQuery}
+          filteredThreads={filteredThreads}
+          activeThreadId={activeThreadId}
+          setActiveThreadId={setActiveThreadId}
+          onSelectThread={(threadId) => {
+            setActiveThreadId(threadId);
+            // Close model menu so it never “sticks” to the last chosen draft model visually
+            setModelMenuOpen(false);
+          }}
+          softDeleteChat={softDeleteChat}
+          monthlyTotalsOpenMobile={monthlyTotalsOpenMobile}
+          setMonthlyTotalsOpenMobile={setMonthlyTotalsOpenMobile}
+          monthlyUsage={monthlyUsage}
+          modelOptions={MODEL_OPTIONS}
+          formatUSD={formatUSD}
+          onSignOut={onSignOut}
+        />
 
         {/* Main */}
         <main className="relative flex h-full flex-1 flex-col">
-          {/* Top bar (mobile sidebar toggle) */}
-          <div className="flex items-center gap-2 border-b border-zinc-200 p-2 md:p-3 h-14">
-            {!sidebarOpen && (
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="rounded-md px-2 py-1 text-sm text-zinc-700 hover:bg-zinc-100"
-                aria-label="Open sidebar"
-              >
-                ☰
-              </button>
-            )}
-              {/* Model selector */}
-              <div className="relative" ref={modelMenuRef}>
-                <button
-                  type="button"
-                  disabled={isModelLocked}
-                  onClick={() => { if (isModelLocked) return; setModelMenuOpen((v) => !v); }}
-                  className="mb-0 inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-900 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                  aria-expanded={modelMenuOpen}
-                >
-                  <span className="font-medium">{selectedModel.name}</span>
-                  <span className="text-zinc-500">∨</span>
-                </button>
 
-                {modelMenuOpen && !isModelLocked && (
-                  <div className="absolute left-0 top-11 w-80 rounded-2xl border border-zinc-200 bg-white shadow-lg p-2 z-20">
-                    {MODEL_OPTIONS.map((opt) => {
-                      const active = opt.key === selectedModelKey;
-                      return (
-                        <button
-                          key={opt.key}
-                          type="button"
-                          onClick={() => {
-                            setSelectedModelKey(opt.key);
-                            setModelMenuOpen(false);
-                          }}
-                          className={[
-                            'w-full rounded-xl px-3 py-2 text-left hover:bg-zinc-50 transition',
-                            active ? 'bg-zinc-100' : '',
-                          ].join(' ')}
-                        >
-                          <div className="text-base text-zinc-900">{opt.name}</div>
-                          <div className="text-sm text-zinc-500">{opt.description}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Chat totals (top right) */}
-              <div className="ml-auto flex items-center gap-3 text-xs text-zinc-500">
-                <span
-                  title="Total tokens and estimated total cost (input + output)"
-                  className="select-none"
-                >
-                  ≈ {chatTotalTokens.toLocaleString()} tok • {formatUSD(chatTotalCostUSD)}
-                </span>
-              </div>
-
-          </div>
+          <ChatHeader
+            sidebarOpen={sidebarOpen}
+            setSidebarOpen={setSidebarOpen}
+            modelMenuRef={modelMenuRef}
+            isModelLocked={isModelLocked}
+            modelMenuOpen={modelMenuOpen}
+            setModelMenuOpen={setModelMenuOpen}
+            selectedModelName={selectedModel.name}
+            selectedModelKey={selectedModelKey}
+            lockedModelKey={lockedModelKey ?? null}
+            modelOptions={MODEL_OPTIONS}
+            setSelectedModelKey={setSelectedModelKey}
+            chatTotalTokens={chatTotalTokens}
+            chatTotalCostUSD={chatTotalCostUSD}
+            formatUSD={formatUSD}
+          />
 
           {/* Messages */}
-            <div
-              ref={scrollRef}
-              className={[
-                "relative flex-1 overflow-y-auto px-4 py-6 md:px-8 transition-opacity pb-40 duration-200 ease-out",
-                isSwitchingThread ? "opacity-40" : "opacity-100",
-              ].join(" ")}
-            >
-            <div className="mx-auto max-w-3xl space-y-4">
-
-              {messages.length === 0 ? (
-                <div className="text-sm text-zinc-500">
-                  Start a new chat by typing below.
-                </div>
-              ) : (
-                messages.map((m, idx) => (
-
-                  <div key={m.id}
-                    className="w-full"
-                    ref={(el) => {
-                      if (!el) {
-                        messageElsRef.current.delete(m.id);
-                        return;
-                      }
-                      messageElsRef.current.set(m.id, el);
-                    }}
-                  >
-                    {m.role === 'user' ? (
-                      <div className="flex justify-end">
-                        <div className="max-w-[85%] group">
-                          <div className="whitespace-pre-wrap rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
-                            {m.content}
-                          </div>
-
-                          {/* Actions (user) */}
-                          {!m.id.startsWith('typing-') && (
-
-                            <div className="mt-1 flex justify-end items-center gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
-                              <span
-                                className="px-2 py-1 text-xs text-zinc-400 select-none"
-                                title="Approx. tokens and estimated input cost"
-                              >
-                                {(() => {
-                                  const t = estimateInputTokens(stripTruncationMarker(m.content), effectiveModelKey);
-                                  const c = estimateCostUSD(t, effectiveModelKey, 'input');
-                                  return `${t.toLocaleString()} tok • ${formatUSD(c)}`;
-                                })()}
-                              </span>
-
-                              <span
-                                className="px-2 py-1 text-xs text-zinc-400 select-none"
-                                title={new Date(m.createdAt).toLocaleString()}
-                              >
-                                {formatMsgTime(m.createdAt)}
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={() => copyMessageToClipboard(stripTruncationMarker(m.content), m.id)}
-                                className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
-                                aria-label="Copy message"
-                                title="Copy"
-                              >
-                                {copiedMessageId === m.id ? 'Copied' : 'Copy'}
-                              </button>
-
-                              {m.role === 'assistant' &&
-                                idx === messages.length - 1 &&
-                                hasTruncationMarker(m.content) && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      sendMessage(
-                                        'Continue from where you left off. Start exactly with the next line. Do not repeat earlier text.'
-                                      )
-                                    }
-                                    className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
-                                    aria-label="Continue"
-                                    title="Continue"
-                                  >
-                                    Continue
-                                  </button>
-                                )}
-
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex justify-start">
-                        <div className="max-w-[85%] group">
-
-                          <div className="py-3 text-md leading-relaxed text-zinc-900">
-                            {m.id.startsWith('typing-') ? (
-                              <TypingIndicator />
-                            ) : (
-                              <AnimatedMarkdownMessage
-                                id={m.id}
-                                text={stripTruncationMarker(m.content)}
-                                onCopy={(code) => copyMessageToClipboard(code, `${m.id}-code`)}
-                                isActive={m.id === animatingAssistantId}
-                                getScrollContainer={getScrollContainer}
-                                getMessageEl={getMessageEl}
-                              />
-                            )}
-                          </div>
-
-                          {/* Actions (assistant) */}
-                          {!m.id.startsWith('typing-') && (
-
-                          <div className="mt-1 flex justify-start items-center gap-1 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() => copyMessageToClipboard(stripTruncationMarker(m.content), m.id)}
-                              className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
-                              aria-label="Copy message"
-                              title="Copy"
-                            >
-                              {copiedMessageId === m.id ? 'Copied' : 'Copy'}
-                            </button>
-
-                            <span
-                              className="px-2 py-1 text-xs text-zinc-400 select-none"
-                              title="Approx. tokens and estimated input cost"
-                            >
-                              {(() => {
-                                const t = estimateTokens(stripTruncationMarker(m.content), effectiveModelKey);
-                                const c = estimateCostUSD(t, effectiveModelKey, 'output');
-                                return `${t.toLocaleString()} tok • ${formatUSD(c)}`;
-                              })()}
-                            </span>
-
-                            <span
-                            className="px-2 py-1 text-xs text-zinc-400 select-none"
-                            title={new Date(m.createdAt).toLocaleString()}
-                          >
-                            {formatMsgTime(m.createdAt)}
-                          </span>
-
-                              {m.role === 'assistant' && idx === messages.length - 1 && hasTruncationMarker(m.content) && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    sendMessage(
-                                      'Continue from where you left off. Start exactly with the next line. Do not repeat earlier text.'
-                                    )
-                                  }
-                                  className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
-                                  aria-label="Continue"
-                                  title="Continue"
-                                >
-                                  Continue
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-
-              <div ref={bottomRef} />
-
-            </div>
-          </div>
+          <MessageList
+            scrollRef={scrollRef}
+            bottomRef={bottomRef}
+            isSwitchingThread={isSwitchingThread}
+            messages={messages}
+            messageElsRef={messageElsRef}
+            effectiveModelKey={effectiveModelKey}
+            copiedMessageId={copiedMessageId}
+            copyMessageToClipboard={copyMessageToClipboard}
+            animatingAssistantId={animatingAssistantId}
+            stripTruncationMarker={stripTruncationMarker}
+            hasTruncationMarker={hasTruncationMarker}
+            estimateInputTokens={estimateInputTokens}
+            estimateTokens={estimateTokens}
+            estimateCostUSD={estimateCostUSD}
+            formatUSD={formatUSD}
+            formatMsgTime={formatMsgTime}
+            sendMessage={sendMessage}
+            TypingIndicator={TypingIndicator}
+            AnimatedMarkdownMessage={AnimatedMarkdownMessage}
+            getScrollContainer={getScrollContainer}
+            getMessageEl={getMessageEl}
+          />
 
           {/* Composer */}
           <div className="absolute bottom-0 left-0 right-0 z-30 p-4 md:p-6 gradient-gradual">
