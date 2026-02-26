@@ -11,7 +11,7 @@
   --orange: #FF3C00;
   --blue: #A0E1FF;
 
-  .gradient-gradual{background: linear-gradient(rgba(0, 0, 0, 0) 0%, rgba(255, 255, 255, 0.9) 50%, rgba(255, 255, 255, 1) 100%);}
+  --font-sans: "Geist";
 
   --background: var(--white);
   --foreground: var(--black);
@@ -26,6 +26,8 @@
   --button-secondary: var(--grey-200);
 
 }
+
+.gradient-gradual{background: linear-gradient(rgba(0, 0, 0, 0) 0%, rgba(255, 255, 255, 0.9) 50%, rgba(255, 255, 255, 1) 100%);}
 
 /* THEMEING */
 
