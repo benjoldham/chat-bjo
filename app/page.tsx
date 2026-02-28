@@ -824,6 +824,14 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+    type AttachmentRef = {
+      kind: 'text' | 'image';
+      metaKey: string;
+      name: string;
+    };
+  const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
+  const [uploadingCount, setUploadingCount] = useState(0);
   const [sending, setSending] = useState(false);
   const [isSwitchingThread, setIsSwitchingThread] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('claude_haiku');
@@ -1245,6 +1253,56 @@ const items = (res.data ?? [])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
 
+    async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
+    const toUpload = Array.from(files);
+    setUploadingCount((n) => n + toUpload.length);
+
+    try {
+      for (const f of toUpload) {
+        const presignRes: any = await client.queries.attachments({
+          action: 'presign',
+          filename: f.name,
+          contentType: f.type || 'text/plain',
+          sizeBytes: f.size,
+        });
+
+        if (presignRes?.errors?.length) {
+          throw new Error(presignRes.errors.map((e: any) => e.message).join(' | '));
+        }
+
+        const { uploadUrl, s3Key } = presignRes?.data ?? presignRes ?? {};
+        if (!uploadUrl || !s3Key) throw new Error('Presign failed (missing uploadUrl or s3Key).');
+
+        const put = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': f.type || 'application/octet-stream' },
+          body: f,
+        });
+        if (!put.ok) throw new Error(`Upload failed: ${put.status} ${put.statusText}`);
+
+        const ingestRes: any = await client.queries.attachments({
+          action: 'ingest',
+          s3Key,
+          contentType: f.type || 'application/octet-stream',
+        });
+
+        if (ingestRes?.errors?.length) {
+          throw new Error(ingestRes.errors.map((e: any) => e.message).join(' | '));
+        }
+
+        const { kind, metaKey } = ingestRes?.data ?? ingestRes ?? {};
+        if (!kind || !metaKey) throw new Error('Ingest failed (missing kind/metaKey).');
+
+        setAttachments((prev) => [...prev, { kind, metaKey, name: f.name }]);
+      }
+    } finally {
+      setUploadingCount((n) => Math.max(0, n - toUpload.length));
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
   async function sendMessage(overrideText?: string) {
   const text = String(overrideText ?? input ?? '').trim();
     if (!text || sending) return;
@@ -1367,6 +1425,7 @@ setMessages((prev) => [
         prompt: composedPrompt,
         modelKey: effectiveModelKey,
         history,
+        attachments: JSON.stringify(attachments.map((a) => ({ metaKey: a.metaKey, kind: a.kind }))),
       });
 
 
@@ -1396,12 +1455,14 @@ setMessages((prev) => [
     }
 
   const assistantCreatedAt = nowIso();
-const assistantMsg = await client.models.ChatMessage.create({
-  threadId,
-  role: 'assistant',
-  content: assistantText,
-  createdAt: assistantCreatedAt,
-});
+  const assistantMsg = await client.models.ChatMessage.create({
+    threadId,
+    role: 'assistant',
+    content: assistantText,
+    createdAt: assistantCreatedAt,
+  });
+
+  setAttachments([]);
 
   const assistantMsgId = assistantMsg.data?.id ?? crypto.randomUUID();
 
@@ -1520,9 +1581,54 @@ void loadThreads(); // threads include modelKey + we compute totals from that
           />
 
           {/* Composer */}
+                    {/* Composer */}
           <div className="absolute bottom-0 left-0 right-0 z-30 p-4 md:p-6 gradient-gradual">
             <div className="mx-auto max-w-3xl">
               <div className="relative">
+                {/* Hidden file input */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".txt,.md,.json,.yaml,.yml,.ts,.tsx,.js,.jsx,.py,.go,.java,.cs,.rb,.php,.rs,.c,.cpp,.h,.hpp,.pdf,.docx,image/*"
+                  className="hidden"
+                  onChange={(e) => void uploadFiles(e.target.files)}
+                />
+
+                {/* Attachments row (above composer, horizontal scroll) */}
+                {(attachments.length > 0 || uploadingCount > 0) && (
+                  <div className="mb-2 px-1">
+                    <div className="hide-scrollbar flex flex-nowrap gap-2 overflow-x-auto whitespace-nowrap pb-1">
+                      {attachments.map((a) => (
+                        <span
+                          key={a.metaKey}
+                          className="shrink-0 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-700"
+                        >
+                          <span className="truncate max-w-[220px]">{a.name}</span>
+                          <button
+                            type="button"
+                            className="text-zinc-400 hover:text-zinc-700"
+                            onClick={() =>
+                              setAttachments((prev) => prev.filter((x) => x.metaKey !== a.metaKey))
+                            }
+                            aria-label={`Remove ${a.name}`}
+                            title="Remove"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+
+                      {uploadingCount > 0 && (
+                        <span className="shrink-0 inline-flex items-center rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-500">
+                          Uploading…
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Composer input */}
                 <div className="relative flex">
                   <textarea
                     ref={textareaRef}
@@ -1534,8 +1640,22 @@ void loadThreads(); // threads include modelKey + we compute totals from that
                     }}
                     placeholder="Message"
                     rows={1}
-                    className="w-full resize-none rounded-4xl border border-zinc-200 bg-white background-primary px-6 py-[18px] pr-20 text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
+                    className="w-full resize-none rounded-4xl border border-zinc-200 bg-white background-primary pl-14 pr-20 py-[18px] text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
                   />
+
+                  {/* Attach button pinned bottom-left */}
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="absolute left-2 bottom-2 h-10 w-10 rounded-full hover:bg-zinc-100 flex items-center justify-center text-zinc-600"
+                    title="Attach files"
+                    aria-label="Attach files"
+                    disabled={sending}
+                  >
+                    📎
+                  </button>
+
+                  {/* Send button pinned bottom-right */}
                   <button
                     onClick={() => sendMessage()}
                     disabled={sending || !input.trim()}
@@ -1557,7 +1677,7 @@ void loadThreads(); // threads include modelKey + we compute totals from that
                 </div>
               </div>
             </div>
-          </div>
+          </div>z
         </main>
       </div>
     </div>
