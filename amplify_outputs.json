@@ -207,6 +207,60 @@
               "type": "String",
               "isRequired": true,
               "attributes": []
+            },
+            "stopReason": {
+              "name": "stopReason",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            }
+          }
+        },
+        "AttachmentsReturnType": {
+          "name": "AttachmentsReturnType",
+          "fields": {
+            "attachmentId": {
+              "name": "attachmentId",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            },
+            "s3Key": {
+              "name": "s3Key",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            },
+            "uploadUrl": {
+              "name": "uploadUrl",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            },
+            "kind": {
+              "name": "kind",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            },
+            "metaKey": {
+              "name": "metaKey",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false,
+              "attributes": []
+            },
+            "chunkCount": {
+              "name": "chunkCount",
+              "isArray": false,
+              "type": "Int",
+              "isRequired": false,
+              "attributes": []
             }
           }
         }
@@ -237,11 +291,86 @@
               "isArray": false,
               "type": "String",
               "isRequired": false
+            },
+            "attachments": {
+              "name": "attachments",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false
+            }
+          }
+        },
+        "attachments": {
+          "name": "attachments",
+          "isArray": false,
+          "type": {
+            "nonModel": "AttachmentsReturnType"
+          },
+          "isRequired": false,
+          "arguments": {
+            "action": {
+              "name": "action",
+              "isArray": false,
+              "type": "String",
+              "isRequired": true
+            },
+            "filename": {
+              "name": "filename",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false
+            },
+            "contentType": {
+              "name": "contentType",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false
+            },
+            "sizeBytes": {
+              "name": "sizeBytes",
+              "isArray": false,
+              "type": "Int",
+              "isRequired": false
+            },
+            "s3Key": {
+              "name": "s3Key",
+              "isArray": false,
+              "type": "String",
+              "isRequired": false
             }
           }
         }
       }
     }
+  },
+  "storage": {
+    "aws_region": "eu-west-2",
+    "bucket_name": "amplify-chatbjo-benjoldha-chatbotuploadsbucket32be-6lzhyfnum7vw",
+    "buckets": [
+      {
+        "name": "chatbotUploads",
+        "bucket_name": "amplify-chatbjo-benjoldha-chatbotuploadsbucket32be-6lzhyfnum7vw",
+        "aws_region": "eu-west-2",
+        "paths": {
+          "tmp/${cognito-identity.amazonaws.com:sub}/*": {
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
+          },
+          "extracted/${cognito-identity.amazonaws.com:sub}/*": {
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
+          }
+        }
+      }
+    ]
   },
   "version": "1.4"
 }
