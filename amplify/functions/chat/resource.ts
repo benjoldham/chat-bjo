@@ -10,7 +10,11 @@ export const chatFunction = defineFunction({
   },
   permissions: [
     {
-      actions: ['bedrock:InvokeModel'],
+      actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+      resources: ['*'],
+    },
+    {
+      actions: ['aws-marketplace:ViewSubscriptions', 'aws-marketplace:Subscribe'],
       resources: ['*'],
     },
   ],
