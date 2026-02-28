@@ -171,3 +171,12 @@ aside input, aside input::placeholder{color: var(--text-primary);}
   0%, 49% { opacity: 0.65; }
   50%, 100% { opacity: 0; }
 }
+
+/* Hide scrollbars for horizontal attachment row (still scrollable) */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;  /* IE/Edge */
+  scrollbar-width: none;     /* Firefox */
+}
