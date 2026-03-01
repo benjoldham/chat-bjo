@@ -14,6 +14,8 @@ const MODEL_ICON: Record<string, { src: string; alt: string }> = {
   claude_sonnet: { src: '/icons/models/claude.svg', alt: 'Anthropic' },
   google_gemma: { src: '/icons/models/google.svg', alt: 'Google' },
   meta: { src: '/icons/models/meta.svg', alt: 'Meta' },
+  nova_canvas: { src: '/icons/models/aws.svg', alt: 'Amazon' },
+
 };
 
 function getModelIcon(key: string) {
