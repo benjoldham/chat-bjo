@@ -3,6 +3,13 @@
 type Thread = {
   id: string;
   title: string;
+  projectId?: string | null;
+};
+
+type Project = {
+  id: string;
+  name: string;
+  description?: string | null;
 };
 
 type MonthlyUsage = {
@@ -29,7 +36,16 @@ export default function Sidebar(props: {
   query: string;
   setQuery: React.Dispatch<React.SetStateAction<string>>;
 
-  filteredThreads: Thread[];
+  unassignedThreads: Thread[];
+  projectThreadsById: Record<string, Thread[]>;
+  
+  projects: Project[];
+  activeProjectId: string | null;
+  setActiveProjectId: React.Dispatch<React.SetStateAction<string | null>>;
+  onOpenCreateProject: () => void;
+  onSelectProject?: (projectId: string | null) => void;
+  softDeleteProject: (projectId: string) => void;
+  
   activeThreadId: string | null;
   setActiveThreadId: React.Dispatch<React.SetStateAction<string | null>>;
   
@@ -55,7 +71,14 @@ export default function Sidebar(props: {
     newChat,
     query,
     setQuery,
-    filteredThreads,
+    unassignedThreads,
+    projectThreadsById,
+    projects,
+    activeProjectId,
+    setActiveProjectId,
+    onOpenCreateProject,
+    onSelectProject,
+    softDeleteProject,
     activeThreadId,
     setActiveThreadId,
     onSelectThread,
@@ -119,14 +142,122 @@ export default function Sidebar(props: {
             </ul>
           </div>
 
-          <div id="chatHistory" className="flex flex-col flex-1 overflow-y-auto px-2.5 pb-2 gap-2">
+          <div className="flex flex-col flex-1 overflow-y-auto gap-8">
+            <div id="projects" className="flex flex-col px-2.5 gap-2">
+
+            <div className="flex items-center justify-between px-2.5">
+              <div className="text-sm font-regular text-secondary tracking-tighter">Projects</div>
+            </div>
+
+            <ul className="space-y-1">
+              <li className="mb-0">
+                <button
+                  onClick={onOpenCreateProject}
+                  className="flex flex-row w-full rounded-lg px-2.5 py-2 gap-1.5 text-sm font-regular text-primary text-left tracking-tighter button sidebar transition"
+                >
+                  <img src="/icons/compose.svg" alt="Create project" className="h-5 w-5" />
+                  Create project
+                </button>
+              </li>
+
+              {projects.map((p) => {
+                const pThreads = projectThreadsById[p.id] ?? [];
+
+                return (
+                  <li key={p.id} className="space-y-1">
+                    <div className="group relative flex items-center rounded-lg transition item-hover">
+                      <button
+                        onClick={() => {
+                          if (onSelectProject) onSelectProject(p.id);
+                          else setActiveProjectId(p.id);
+
+                          if (window.innerWidth < 768) setSidebarOpen(false);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 pr-10 text-left text-sm tracking-tighter text-primary transition button sidebar"
+                        title={p.description ?? ''}
+                      >
+                        <img
+                          src={activeProjectId === p.id ? '/icons/folder-open.svg' : '/icons/folder.svg'}
+                          alt=""
+                          className="h-5 w-5 opacity-80"
+                          id=""
+                        />
+                        <span className="truncate">{p.name}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          softDeleteProject(p.id);
+                        }}
+                        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-sm text-zinc-500 opacity-0 transition hover:bg-zinc-200 group-hover:opacity-100"
+                        aria-label="Delete project"
+                        title="Delete project"
+                      >
+                        🗑
+                      </button>
+                    </div>
+
+                    {activeProjectId === p.id && pThreads.length > 0 && (
+                      <ul className="space-y-1 pl-7">
+                        {pThreads.map((t) => (
+                          <li key={t.id}>
+                              <div
+                                className={[
+                                  'group relative flex items-center rounded-lg transition',
+                                  activeThreadId === t.id ? 'item-active' : 'item-hover',
+                                ].join(' ')}
+                              >
+                              <button
+                                onClick={() => {
+                                  if (onSelectThread) onSelectThread(t.id);
+                                  else setActiveThreadId(t.id);
+
+                                  // ✅ close only on mobile
+                                  if (window.innerWidth < 768) setSidebarOpen(false);
+                                }}
+                                className="w-full rounded-lg px-2.5 py-2 pr-10 text-left text-sm tracking-tighter text-primary transition button sidebar truncate whitespace-nowrap overflow-hidden text-ellipsis"
+                                title={t.title}
+                              >
+                                
+                                {t.title}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  softDeleteChat(t.id);
+                                }}
+                                className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-sm text-zinc-500 opacity-0 transition hover:bg-zinc-200 group-hover:opacity-100"
+                                aria-label="Delete chat"
+                                title="Delete chat"
+                              >
+                                🗑
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+          </div>
+
+          <div id="chatHistory" className="flex flex-col px-2.5 pb-2 gap-2">
             <div className="text-sm font-regular text-secondary tracking-tighter px-2.5">Your chats</div>
 
-            {filteredThreads.length === 0 ? (
+            {unassignedThreads.length === 0 ? (
               <div className="px-2.5 py-3 text-sm text-primary">No chats yet.</div>
             ) : (
               <ul className="space-y-1">
-                {filteredThreads.map((t) => (
+                {unassignedThreads.map((t) => (
                   <li key={t.id}>
                     <div
                       className={[
@@ -165,6 +296,7 @@ export default function Sidebar(props: {
                 ))}
               </ul>
             )}
+          </div>
           </div>
 
           <div id="monthlyTotals" className="px-3 pb-2">
