@@ -100,14 +100,14 @@ export default function MessageList(props: {
             >
               {m.role === 'user' ? (
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] group">
-                    <div className="whitespace-pre-wrap rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
+                  <div className="max-w-[85%] group inline-flex flex-col items-end">
+                    <div className="whitespace-pre-wrap inline-block w-fit max-w-full rounded-2xl px-4 py-3 text-md leading-relaxed text-zinc-900 bg-bubble">
                       {m.content}
                     </div>
 
                     {!m.id.startsWith('typing-') && (
-                      <div className="h-7 mt-1 flex justify-end items-center gap-2 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
-                        <span className="py-1 text-xs text-primary select-none" title="Approx. tokens and estimated input cost">
+                      <div className="h-7 mt-1 flex w-full justify-end items-center gap-2 transition opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+                        <span className="py-1 text-xs text-zinc-400 select-none text-right break-words" title="Approx. tokens and estimated input cost">
                           {(() => {
                             const t = estimateInputTokens(stripTruncationMarker(m.content), effectiveModelKey);
                             const c = estimateCostUSD(t, effectiveModelKey, 'input');
@@ -176,7 +176,7 @@ export default function MessageList(props: {
                           {copiedMessageId === m.id ? ('Copied') : ( <img src="/icons/copy-left.svg" alt="Copy" className="h-5 w-5"/>)}
                         </button>
 
-                        <span className="py-1 text-xs text-primary select-none" title="Approx. tokens and estimated input cost">
+                        <span className="py-1 text-xs text-zinc-400 select-none" title="Approx. tokens and estimated input cost">
                           {(() => {
                             const t = estimateTokens(stripTruncationMarker(m.content), effectiveModelKey);
                             const c = estimateCostUSD(t, effectiveModelKey, 'output');
