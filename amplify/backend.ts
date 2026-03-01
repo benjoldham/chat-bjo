@@ -29,6 +29,16 @@ backend.chatFunction.resources.lambda.addToRolePolicy(
   })
 );
 
+backend.chatFunction.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ['s3:PutObject', 's3:AbortMultipartUpload'],
+    resources: [
+      `${backend.storage.resources.bucket.bucketArn}/generated/*`,
+      `${backend.storage.resources.bucket.bucketArn}/generated/nova-canvas/*`,
+    ],
+  })
+);
+
 backend.attachmentsFunction.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject', 's3:AbortMultipartUpload'],
