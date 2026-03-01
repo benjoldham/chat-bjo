@@ -49,10 +49,21 @@ export const data = defineData({
         .model({
           title: a.string().required(),
           modelKey: a.string(), // optional for legacy compatibility
+          projectId: a.id(), // ✅ NEW: nullable means “no project”
           createdAt: a.datetime().required(),
           deletedAt: a.datetime(), // nullable = soft delete (cross-device)
         })
       .authorization((allow) => [allow.owner()]),
+
+      Project: a
+        .model({
+          name: a.string().required(),
+          description: a.string(), // ✅ persistent instructions live here
+          createdAt: a.datetime().required(),
+          updatedAt: a.datetime(),
+          deletedAt: a.datetime(), // ✅ NEW: soft delete like chats
+        })
+        .authorization((allow) => [allow.owner()]),
 
     ChatMessage: a
       .model({
