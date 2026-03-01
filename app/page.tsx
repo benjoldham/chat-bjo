@@ -15,12 +15,25 @@ import { client } from './lib/amplifyClient';
 import Sidebar from './components/Sidebar';
 import ChatHeader from './components/ChatHeader';
 import MessageList from './components/MessageList';
+import ProjectView from './components/ProjectView';
+import MessageComposer from './components/MessageComposer';
+
 
 type Thread = {
   id: string;
   title: string;
   modelKey?: string | null;
+  projectId?: string | null; // ✅ NEW
   createdAt: string;
+  deletedAt?: string | null;
+};
+
+type Project = {
+  id: string;
+  name: string;
+  description?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
   deletedAt?: string | null;
 };
 
@@ -71,6 +84,8 @@ const MODEL_OPTIONS: ModelOption[] = [
   { key: 'openai', name: 'ChatGPT (OpenAI)', description: 'Best for writing and creative work' },
   { key: 'meta', name: 'LLama 3 (Meta)', description: 'Best for logical and analytical tasks' },
   { key: 'claude_sonnet', name: 'Claude Sonnet 4.6', description: 'Best for code and complex reasoning' },
+  { key: 'nova_canvas', name: 'Nova Canvas (Amazon)', description: 'For image generation' },
+
 ];
 
 // ---- Model-specific tone (injected into the prompt; not shown to users) ----
@@ -101,6 +116,11 @@ const MODEL_TONE: Record<string, { label: string; style: string }> = {
     style:
       'Be technical and rigorous, but still approachable. Ask one clarifying question if needed; otherwise make reasonable assumptions and proceed. Include small, correct code snippets with caveats/edge cases.',
   },
+  nova_canvas: {
+    label: 'Nova Canvas — image generation',
+    style:
+      'Be concise. If the prompt is missing key visual details (subject/style/aspect), ask ONE clarifying question; otherwise proceed. Output only what the app needs to render the result.',
+  },
 };
 
 function buildSystemPrompt(modelKey: string) {
@@ -122,6 +142,51 @@ function buildSystemPrompt(modelKey: string) {
 }
 
 // ---- Token + pricing estimates (frontend) ----
+
+// ---- Image pricing (frontend) ----
+// Nova Canvas is priced per image (not per token).
+// Values shown in your screenshot (Europe / Ireland):
+const NOVA_CANVAS_IMAGE_PRICING_USD = {
+  standard: {
+    '1024': 0.04,
+    '2048': 0.06,
+  },
+  premium: {
+    '1024': 0.06,
+    '2048': 0.08,
+  },
+} as const;
+
+// Your backend currently generates 1 image at 1024x1024 standard quality.
+// (Matches the handler default we added earlier.)
+const NOVA_CANVAS_DEFAULTS = {
+  quality: 'standard' as const,
+  resolution: 1024 as 1024 | 2048,
+  imagesPerRequest: 1,
+};
+
+function countInlineImages(markdown: string) {
+  // Matches: data:image/png;base64,... (your handler returns this)
+  const matches = markdown.match(/data:image\/[a-zA-Z0-9.+-]+;base64,/g);
+  return matches ? matches.length : 0;
+}
+
+function estimateNovaCanvasCostUSD(kind: 'input' | 'output', content?: string) {
+  if (kind === 'input') return 0;
+
+  // If we can detect embedded images, bill per image.
+  // Otherwise assume the backend produced 1 image for the assistant turn.
+  const n =
+    content && content.trim().length > 0
+      ? Math.max(1, countInlineImages(content))
+      : NOVA_CANVAS_DEFAULTS.imagesPerRequest;
+
+  const price =
+    NOVA_CANVAS_IMAGE_PRICING_USD[NOVA_CANVAS_DEFAULTS.quality][String(NOVA_CANVAS_DEFAULTS.resolution) as '1024' | '2048'];
+
+  return n * price;
+}
+
 // Values are "USD per 1K tokens" (derived from your "$ per 1M tokens" / 1000).
 const MODEL_PRICING_USD: Record<
   string,
@@ -140,6 +205,8 @@ const MODEL_PRICING_USD: Record<
   meta: { inputPer1K: 0.00072, outputPer1K: 0.00072 },
 
   claude_haiku: { inputPer1K: 0.00025, outputPer1K: 0.00125 },
+    // Nova Canvas is image generation; token pricing isn't used in this UI estimator.
+  nova_canvas: { inputPer1K: 0, outputPer1K: 0 },
 };
 
 
@@ -180,7 +247,17 @@ function formatUSD(amount: number) {
   return `$${amount.toFixed(2)}`;
 }
 
-function estimateCostUSD(tokens: number, modelKey: string, kind: 'input' | 'output') {
+function estimateCostUSD(
+  tokens: number,
+  modelKey: string,
+  kind: 'input' | 'output',
+  content?: string
+) {
+  // Nova Canvas: priced per image generated (not token-based)
+  if (modelKey === 'nova_canvas') {
+    return estimateNovaCanvasCostUSD(kind, content);
+  }
+
   const p = MODEL_PRICING_USD[modelKey] ?? { inputPer1K: 0, outputPer1K: 0 };
   const per1K = kind === 'input' ? p.inputPer1K : p.outputPer1K;
   return (tokens / 1000) * per1K;
@@ -612,6 +689,17 @@ function MarkdownMessage({
               {children}
             </td>
           ),
+          img: ({ src, alt }) => {
+            if (!src || src.trim().length === 0) return null;
+
+            return (
+              <img
+                src={src}
+                alt={alt ?? 'Generated image'}
+                className="rounded-xl max-w-full h-auto"
+              />
+            );
+          },
           code: ({ className, children, ...props }) => {
             const codeString = String(children ?? '').replace(/\n$/, '');
             const language = (className ?? '').replace('language-', '').trim();
@@ -821,20 +909,37 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectViewProjectId, setProjectViewProjectId] = useState<string | null>(null);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [projectCreateError, setProjectCreateError] = useState<string | null>(null);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-    type AttachmentRef = {
-      kind: 'text' | 'image';
-      metaKey: string;
-      name: string;
-    };
+  const fileInputRef = useRef<HTMLInputElement | null>(null); type AttachmentRef = { kind: 'text' | 'image'; metaKey: string; name: string;};
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [sending, setSending] = useState(false);
   const [isSwitchingThread, setIsSwitchingThread] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('claude_haiku');
+  // Nova Canvas UI controls (only used when nova_canvas is selected)
+  type NovaQuality = 'standard' | 'premium';
+  type NovaSize = 1024 | 2048;
+  type NovaAR = '1:1' | '16:9' | '9:16';
+  type NovaImages = 1 | 2;
+  type NovaStyle = 'none' | 'photoreal' | 'illustration' | '3d' | 'anime';
+
+  const [novaQuality, setNovaQuality] = useState<NovaQuality>('standard');
+  const [novaSize, setNovaSize] = useState<NovaSize>(1024);
+  const [novaAR, setNovaAR] = useState<NovaAR>('1:1');
+  const [novaImages, setNovaImages] = useState<NovaImages>(1);
+  const [novaSeed, setNovaSeed] = useState<string>(''); // empty => random
+  const [novaStyle, setNovaStyle] = useState<NovaStyle>('none');
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [threadModelKeys, setThreadModelKeys] = useState<Record<string, string>>({});
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -843,34 +948,77 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
 
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
-async function softDeleteChat(threadId: string) {
-  const ok = window.confirm('Delete this chat? (It will be hidden on all your devices.)');
-  if (!ok) return;
+  async function softDeleteChat(threadId: string) {
+    const ok = window.confirm('Delete this chat? (It will be hidden on all your devices.)');
+    if (!ok) return;
 
-  // Optimistic UI: remove immediately
-  setThreads((prev) => prev.filter((t) => t.id !== threadId));
+    // Optimistic UI: remove immediately
+    setThreads((prev) => prev.filter((t) => t.id !== threadId));
 
-  // If active chat deleted, clear UI
-  if (activeThreadId === threadId) {
-    setActiveThreadId(null);
-    setMessages([]);
+    // If active chat deleted, clear UI
+    if (activeThreadId === threadId) {
+      setActiveThreadId(null);
+      setMessages([]);
+    }
+
+    try {
+      await client.models.ChatThread.update({
+        id: threadId,
+        deletedAt: nowIso(),
+      } as any);
+
+      // Refresh list so it stays consistent
+      await loadThreads();
+    } catch (e) {
+      console.error(e);
+      alert('Failed to delete chat. Please refresh and try again.');
+      await loadThreads();
+    }
   }
 
+  async function softDeleteProject(projectId: string) {
+  const ok = window.confirm('Delete this project? Its chats will also be hidden.');
+  if (!ok) return;
+
+  const ts = nowIso();
+
   try {
-    await client.models.ChatThread.update({
-      id: threadId,
-      deletedAt: nowIso(),
+    // Soft delete project
+    await client.models.Project.update({
+      id: projectId,
+      deletedAt: ts,
+      updatedAt: ts,
     } as any);
 
-    // Refresh list so it stays consistent
+    // Soft delete chats in project
+    const res = await client.models.ChatThread.list({});
+    const projectThreads = (res.data ?? []).filter(
+      (t: any) => t && t.id && t.projectId === projectId && !t.deletedAt
+    );
+
+    await Promise.all(
+      projectThreads.map((t: any) =>
+        client.models.ChatThread.update({ id: t.id, deletedAt: ts } as any)
+      )
+    );
+
+    // UI cleanup
+    if (activeProjectId === projectId) setActiveProjectId(null);
+    if (projectViewProjectId === projectId) setProjectViewProjectId(null);
+
+    // close modal if we were editing this project
+    if (editingProjectId === projectId) {
+      setProjectModalOpen(false);
+      setEditingProjectId(null);
+    }
+
+    await loadProjects();
     await loadThreads();
   } catch (e) {
     console.error(e);
-    alert('Failed to delete chat. Please refresh and try again.');
-    await loadThreads();
+    alert('Failed to delete project. Please refresh and try again.');
   }
 }
-
 
   function persistHiddenThreadIds(next: string[]) {
     setHiddenThreadIds(next);
@@ -930,6 +1078,7 @@ async function softDeleteChat(threadId: string) {
 
   const lockedModelKey = activeThreadId ? threadModelKeys[activeThreadId] : undefined;
   const effectiveModelKey = lockedModelKey ?? selectedModelKey;
+  const isNova = effectiveModelKey === 'nova_canvas';
 
   const selectedModel = useMemo(
     () => MODEL_OPTIONS.find((m) => m.key === effectiveModelKey) ?? MODEL_OPTIONS[0],
@@ -1058,11 +1207,125 @@ useEffect(() => {
   return () => document.removeEventListener('mousedown', onDocMouseDown);
 }, []);
 
-  const filteredThreads = useMemo(() => {
+const projectById = useMemo(() => {
+    const m: Record<string, Project> = {};
+    for (const p of projects) m[p.id] = p;
+    return m;
+  }, [projects]);
+
+  const activeThreadProjectId = useMemo(() => {
+    const t = threads.find((x) => x.id === activeThreadId);
+    return t?.projectId ?? null;
+  }, [threads, activeThreadId]);
+
+  // If a thread is open, its project wins. Otherwise use the sidebar-selected project.
+  const effectiveProjectId = activeThreadProjectId ?? activeProjectId;
+
+  const activeProject = useMemo(() => {
+    return effectiveProjectId ? projectById[effectiveProjectId] ?? null : null;
+  }, [effectiveProjectId, projectById]);
+
+  // Search applies globally (like ChatGPT)
+  const searchedThreads = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return threads;
     return threads.filter((t) => t.title.toLowerCase().includes(q));
   }, [threads, query]);
+
+  // “Your chats” = unassigned only (never affected by Projects)
+  const unassignedThreads = useMemo(() => {
+    return searchedThreads.filter((t) => !t.projectId);
+  }, [searchedThreads]);
+
+  // Chats grouped under each project (folder-style)
+  const projectThreadsById = useMemo(() => {
+    const map: Record<string, Thread[]> = {};
+    for (const t of searchedThreads) {
+      if (!t.projectId) continue;
+      if (!map[t.projectId]) map[t.projectId] = [];
+      map[t.projectId].push(t);
+    }
+    return map;
+  }, [searchedThreads]);
+
+  // Project shown in the project-home screen
+  const projectViewProject = useMemo(() => {
+    return projectViewProjectId ? projectById[projectViewProjectId] ?? null : null;
+  }, [projectViewProjectId, projectById]);
+
+  const projectViewThreads = useMemo(() => {
+    return projectViewProjectId ? projectThreadsById[projectViewProjectId] ?? [] : [];
+  }, [projectViewProjectId, projectThreadsById]);
+
+  async function loadProjects() {
+    const res = await client.models.Project.list({});
+    const items = (res.data ?? [])
+      .filter((p: any) => p && p.id && !p.deletedAt)
+      .map((p: any) => ({
+        id: p.id,
+        name: p.name ?? 'Untitled project',
+        description: p.description ?? null,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt ?? null,
+        deletedAt: p.deletedAt ?? null,
+      })) as Project[];
+
+    // newest first
+    items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    setProjects(items);
+  }
+
+async function saveProject() {
+  const name = newProjectName.trim();
+  const description = newProjectDescription.trim();
+
+  if (!name) {
+    setProjectCreateError('Project name is required.');
+    return;
+  }
+
+  setCreatingProject(true);
+  setProjectCreateError(null);
+
+  try {
+    const now = new Date().toISOString();
+
+    if (editingProjectId) {
+      await client.models.Project.update({
+        id: editingProjectId,
+        name,
+        description: description.length ? description : undefined,
+        updatedAt: now,
+      } as any);
+    } else {
+      const res = await client.models.Project.create({
+        name,
+        description: description.length ? description : undefined,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const createdId = (res as any)?.data?.id ?? null;
+      if (createdId) {
+        setActiveProjectId(createdId);
+        setProjectViewProjectId(createdId); // ✅ immediately show the new project
+        setActiveThreadId(null);
+        setMessages([]);
+      }
+    }
+
+    await loadProjects();
+
+    setProjectModalOpen(false);
+    setEditingProjectId(null);
+    setNewProjectName('');
+    setNewProjectDescription('');
+  } catch (e: any) {
+    setProjectCreateError(e?.message ?? 'Failed to save project.');
+  } finally {
+    setCreatingProject(false);
+  }
+}
 
   async function loadThreads() {
     const res = await client.models.ChatThread.list({
@@ -1075,6 +1338,7 @@ const items = (res.data ?? [])
     id: t.id,
     title: t.title ?? 'Untitled',
     modelKey: t.modelKey ?? null,
+    projectId: t.projectId ?? null, // ✅ NEW
     createdAt: t.createdAt,
     deletedAt: t.deletedAt ?? null,
   })) as Thread[];
@@ -1210,16 +1474,20 @@ const items = (res.data ?? [])
     }
   }
 
-    async function newChat() {
-      setActiveThreadId(null);
-      setMessages([]);
-      setInput('');
+  async function newChat() {
+    setActiveThreadId(null);
+    setMessages([]);
+    setInput('');
 
-      // Mobile UX: close the sidebar so the chat view is visible
-      if (window.innerWidth < 768) setSidebarOpen(false);
-    }
+    // New chat should start unassigned unless user explicitly starts from a Project
+    setActiveProjectId(null);
+    setProjectViewProjectId(null);
+
+    if (window.innerWidth < 768) setSidebarOpen(false);
+  }
 
   useEffect(() => {
+    loadProjects();
     loadThreads();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1303,7 +1571,7 @@ const items = (res.data ?? [])
     }
   }
 
-  async function sendMessage(overrideText?: string) {
+  async function sendMessage(overrideText?: string, overrideProjectId?: string | null) {
   const text = String(overrideText ?? input ?? '').trim();
     if (!text || sending) return;
 
@@ -1319,6 +1587,7 @@ const items = (res.data ?? [])
 const createThread = await client.models.ChatThread.create({
   title: 'New chat',
   modelKey: selectedModelKey,
+  projectId: overrideProjectId ?? activeProjectId, // ✅ allow ProjectView to force project target
   createdAt: threadCreatedAt,
 });
 
@@ -1414,12 +1683,33 @@ setMessages((prev) => [
 
     let assistantText = '';
     try {
-      const history = JSON.stringify(buildHistoryForModel(messages, text, 20));
+      // Pick the correct project instructions (important when ProjectView forces a projectId)
+      const instructionsProject =
+        (overrideProjectId ? projectById[String(overrideProjectId)] : activeProject) ?? null;
+
+      const projectInstructions =
+        instructionsProject?.description && instructionsProject.description.trim().length > 0
+          ? `Project instructions:\n${instructionsProject.description.trim()}`
+          : '';
+
+      const textForModel = projectInstructions ? `${projectInstructions}\n\n${text}` : text;
+
+      const history = JSON.stringify(buildHistoryForModel(messages, textForModel, 20));
 
       // Inject a short system prompt that sets a warm baseline + model-specific tone.
       // We keep the UI/DB message as the user's raw text; only the model sees this wrapper.
       const systemPrompt = buildSystemPrompt(effectiveModelKey);
-      const composedPrompt = `${systemPrompt}\n\nUser message:\n${text}`;
+
+      const novaTag = isNova
+        ? `\n\n[nova quality:${novaQuality} size:${novaSize} ar:${novaAR} images:${novaImages}${
+            novaSeed.trim() ? ` seed:${novaSeed.trim()}` : ''
+          }${novaStyle !== 'none' ? ` style:${novaStyle}` : ''}]`
+        : '';
+
+      // IMPORTANT: include project instructions for ALL models (including Nova)
+      const composedPrompt = isNova
+        ? `${textForModel}${novaTag}`
+        : [systemPrompt, `\n\nUser message:\n${textForModel}`].join('');
 
       const chatRes: any = await client.queries.chat({
         prompt: composedPrompt,
@@ -1501,10 +1791,24 @@ void loadThreads(); // threads include modelKey + we compute totals from that
     setSending(false);
   }
 
+  async function sendFromComposer(overrideText?: string) {
+    // If we’re on the Project home screen, first message should create a thread under that project
+    if (projectViewProject && !activeThreadId) {
+      setActiveProjectId(projectViewProject.id);
+      setProjectViewProjectId(null);
+      setActiveThreadId(null);
+      setMessages([]);
+      await sendMessage(overrideText, projectViewProject.id);
+      return;
+    }
+
+    await sendMessage(overrideText);
+  }
+
   function onComposerKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      void sendFromComposer();
     }
   }
 
@@ -1518,14 +1822,49 @@ void loadThreads(); // threads include modelKey + we compute totals from that
           newChat={newChat}
           query={query}
           setQuery={setQuery}
-          filteredThreads={filteredThreads}
+          softDeleteProject={softDeleteProject}
+          unassignedThreads={unassignedThreads}
+          projectThreadsById={projectThreadsById}
+          projects={projects}
+          activeProjectId={activeProjectId}
+          setActiveProjectId={(pid) => {
+            setActiveProjectId(pid);
+            setActiveThreadId(null);
+            setMessages([]);
+          }}
+          onOpenCreateProject={() => {
+            setProjectCreateError(null);
+            setEditingProjectId(null);
+            setNewProjectName('');
+            setNewProjectDescription('');
+            setProjectModalOpen(true);
+          }}
+          onSelectProject={(pid) => {
+          // select a project
+          setActiveProjectId(pid);
+
+          // clear current chat so ProjectView can show
+          setActiveThreadId(null);
+          setMessages([]);
+
+          // show project home screen (whatever state you named it)
+          setProjectViewProjectId(pid);
+           }}
           activeThreadId={activeThreadId}
           setActiveThreadId={setActiveThreadId}
+
           onSelectThread={(threadId) => {
             setActiveThreadId(threadId);
-            // Close model menu so it never “sticks” to the last chosen draft model visually
+
+            // Selecting a chat replaces project-home view with message list
+            setProjectViewProjectId(null);
+
+            const t = threads.find((x) => x.id === threadId);
+            setActiveProjectId(t?.projectId ?? null);
+
             setModelMenuOpen(false);
           }}
+
           softDeleteChat={softDeleteChat}
           monthlyTotalsOpenMobile={monthlyTotalsOpenMobile}
           setMonthlyTotalsOpenMobile={setMonthlyTotalsOpenMobile}
@@ -1555,130 +1894,202 @@ void loadThreads(); // threads include modelKey + we compute totals from that
             formatUSD={formatUSD}
           />
 
-          {/* Messages */}
-          <MessageList
-            scrollRef={scrollRef}
-            bottomRef={bottomRef}
-            isSwitchingThread={isSwitchingThread}
-            messages={messages}
-            messageElsRef={messageElsRef}
-            effectiveModelKey={effectiveModelKey}
-            copiedMessageId={copiedMessageId}
-            copyMessageToClipboard={copyMessageToClipboard}
-            animatingAssistantId={animatingAssistantId}
-            stripTruncationMarker={stripTruncationMarker}
-            hasTruncationMarker={hasTruncationMarker}
-            estimateInputTokens={estimateInputTokens}
-            estimateTokens={estimateTokens}
-            estimateCostUSD={estimateCostUSD}
-            formatUSD={formatUSD}
-            formatMsgTime={formatMsgTime}
-            sendMessage={sendMessage}
+          {projectViewProject && !activeThreadId ? (
+            <ProjectView
+              project={projectViewProject}
+              threads={projectViewThreads}
+              onStartChat={async (firstMessage) => {
+                // Start a new chat in this project with the first message (ChatGPT style)
+                setActiveProjectId(projectViewProject.id);
+                setProjectViewProjectId(null);
+                setActiveThreadId(null);
+                setMessages([]);
+
+                // Force thread creation under this project
+                await sendMessage(firstMessage, projectViewProject.id);
+              }}
+              onSelectThread={(threadId) => {
+                setProjectViewProjectId(null);
+                setActiveThreadId(threadId);
+                if (window.innerWidth < 768) setSidebarOpen(false);
+              }}
+              onDeleteThread={(threadId) => softDeleteChat(threadId)}
+              onEditProject={() => {
+                setProjectCreateError(null);
+                setEditingProjectId(projectViewProject.id);
+                setNewProjectName(projectViewProject.name);
+                setNewProjectDescription(projectViewProject.description ?? '');
+                setProjectModalOpen(true);
+              }}
+            />
+          ) : (
+            <>
+              {/* Messages */}
+              <MessageList
+                scrollRef={scrollRef}
+                bottomRef={bottomRef}
+                isSwitchingThread={isSwitchingThread}
+                messages={messages}
+                messageElsRef={messageElsRef}
+                effectiveModelKey={effectiveModelKey}
+                copiedMessageId={copiedMessageId}
+                copyMessageToClipboard={copyMessageToClipboard}
+                animatingAssistantId={animatingAssistantId}
+                stripTruncationMarker={stripTruncationMarker}
+                hasTruncationMarker={hasTruncationMarker}
+                estimateInputTokens={estimateInputTokens}
+                estimateTokens={estimateTokens}
+                estimateCostUSD={estimateCostUSD}
+                formatUSD={formatUSD}
+                formatMsgTime={formatMsgTime}
+                sendMessage={sendMessage}
+                TypingIndicator={TypingIndicator}
+                AnimatedMarkdownMessage={AnimatedMarkdownMessage}
+                getScrollContainer={getScrollContainer}
+                getMessageEl={getMessageEl}
+              />
+
+            </>
+          )}
+
+          <MessageComposer
+            fileInputRef={fileInputRef}
+            uploadFiles={uploadFiles}
+            attachments={attachments}
+            setAttachments={setAttachments}
+            uploadingCount={uploadingCount}
+            isNova={isNova}
+            novaQuality={novaQuality}
+            setNovaQuality={setNovaQuality}
+            novaSize={novaSize}
+            setNovaSize={setNovaSize}
+            novaAR={novaAR}
+            setNovaAR={setNovaAR}
+            novaImages={novaImages}
+            setNovaImages={setNovaImages}
+            novaStyle={novaStyle}
+            setNovaStyle={setNovaStyle}
+            novaSeed={novaSeed}
+            setNovaSeed={setNovaSeed}
+            textareaRef={textareaRef}
+            input={input}
+            handleInputChange={handleInputChange}
+            onComposerKeyDown={onComposerKeyDown}
+            resizeTextarea={resizeTextarea}
+            sending={sending}
+            sendFromComposer={sendFromComposer}
             TypingIndicator={TypingIndicator}
-            AnimatedMarkdownMessage={AnimatedMarkdownMessage}
-            getScrollContainer={getScrollContainer}
-            getMessageEl={getMessageEl}
+            estimatedInputTokens={estimatedInputTokens}
+            estimatedInputCostUSD={estimatedInputCostUSD}
+            formatUSD={formatUSD}
+            selectedModelName={selectedModel.name}
+            isModelLocked={isModelLocked}
           />
+        </main>
 
-          {/* Composer */}
-                    {/* Composer */}
-          <div className="absolute bottom-0 left-0 right-0 z-30 p-4 md:p-6 gradient-gradual">
-            <div className="mx-auto max-w-3xl">
-              <div className="relative">
-                {/* Hidden file input */}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".txt,.md,.json,.yaml,.yml,.ts,.tsx,.js,.jsx,.py,.go,.java,.cs,.rb,.php,.rs,.c,.cpp,.h,.hpp,.pdf,.docx,image/*"
-                  className="hidden"
-                  onChange={(e) => void uploadFiles(e.target.files)}
-                />
+        {projectModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            {/* Backdrop */}
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/40"
+              aria-label="Close project modal"
+              onClick={() => setProjectModalOpen(false)}
+            />
 
-                {/* Attachments row (above composer, horizontal scroll) */}
-                {(attachments.length > 0 || uploadingCount > 0) && (
-                  <div className="mb-2 px-1">
-                    <div className="hide-scrollbar flex flex-nowrap gap-2 overflow-x-auto whitespace-nowrap pb-1">
-                      {attachments.map((a) => (
-                        <span
-                          key={a.metaKey}
-                          className="shrink-0 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-700"
-                        >
-                          <span className="truncate max-w-[220px]">{a.name}</span>
-                          <button
-                            type="button"
-                            className="text-zinc-400 hover:text-zinc-700"
-                            onClick={() =>
-                              setAttachments((prev) => prev.filter((x) => x.metaKey !== a.metaKey))
-                            }
-                            aria-label={`Remove ${a.name}`}
-                            title="Remove"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
+            {/* Modal */}
+            <div className="relative w-[92vw] max-w-lg rounded-2xl bg-white shadow-xl border border-zinc-200 p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-lg font-medium tracking-tight text-zinc-900">
+                    {editingProjectId ? 'Edit project' : 'Create project'}
+                  </div>
+                  <div className="text-sm text-zinc-500 mt-1">
+                    Group chats and apply persistent instructions.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-md px-2 py-1 text-sm text-zinc-500 hover:bg-zinc-100"
+                  onClick={() => setProjectModalOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
 
-                      {uploadingCount > 0 && (
-                        <span className="shrink-0 inline-flex items-center rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-500">
-                          Uploading…
-                        </span>
-                      )}
-                    </div>
+              <div className="mt-4 space-y-3">
+                <div className="space-y-1">
+                  <label className="text-sm text-zinc-700">Project name</label>
+                  <input
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-200"
+                    placeholder="e.g. Marketing copy"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm text-zinc-700">Project description</label>
+                  <textarea
+                    value={newProjectDescription}
+                    onChange={(e) => setNewProjectDescription(e.target.value)}
+                    className="w-full min-h-[120px] rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-200"
+                    placeholder="Persistent instructions for chats in this project…"
+                  />
+                  <div className="text-xs text-zinc-500">
+                    This will be included with every message you send in this project.
+                  </div>
+                </div>
+
+                {projectCreateError && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {projectCreateError}
                   </div>
                 )}
+              </div>
 
-                {/* Composer input */}
-                <div className="relative flex">
-                  <textarea
-                    ref={textareaRef}
-                    value={input}
-                    onChange={handleInputChange}
-                    onKeyDown={(e) => {
-                      onComposerKeyDown(e);
-                      requestAnimationFrame(() => resizeTextarea());
-                    }}
-                    placeholder="Message"
-                    rows={1}
-                    className="w-full resize-none rounded-4xl border border-zinc-200 bg-white background-primary pl-14 pr-20 py-[18px] text-base text-primary leading-relaxed outline-none focus:border-zinc-400 max-h-[400px] overflow-y-auto"
-                  />
-
-                  {/* Attach button pinned bottom-left */}
+              <div className="mt-5 flex items-center justify-between gap-2">
+                {editingProjectId ? (
                   <button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="absolute left-2 bottom-2 h-10 w-10 rounded-full hover:bg-zinc-100 flex items-center justify-center text-zinc-600"
-                    title="Attach files"
-                    aria-label="Attach files"
-                    disabled={sending}
+                    className="rounded-xl px-3 py-2 text-sm text-red-700 hover:bg-red-50"
+                    onClick={() => void softDeleteProject(editingProjectId)}
+                    disabled={creatingProject}
                   >
-                    📎
+                    Delete project
                   </button>
+                ) : (
+                  <span />
+                )}
 
-                  {/* Send button pinned bottom-right */}
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => sendMessage()}
-                    disabled={sending || !input.trim()}
-                    className="absolute right-2 bottom-2 h-12 px-4 rounded-full bg-zinc-900 text-base font-medium text-white flex items-center justify-center disabled:opacity-40"
+                    type="button"
+                    className="rounded-xl px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100"
+                    onClick={() => {
+                      setProjectModalOpen(false);
+                      setEditingProjectId(null);
+                    }}
+                    disabled={creatingProject}
                   >
-                    {sending ? <TypingIndicator /> : 'Send'}
+                    Cancel
                   </button>
-                </div>
 
-                {/* Token + cost estimate */}
-                <div className="mt-2 flex items-center justify-between px-2 text-xs text-zinc-500">
-                  <span>
-                    Est. {estimatedInputTokens.toLocaleString()} tokens
-                    <span className="ml-2 text-zinc-400">
-                      ({selectedModel.name}{isModelLocked ? '' : ''})
-                    </span>
-                  </span>
-                  <span>≈ {formatUSD(estimatedInputCostUSD)} input</span>
+                  <button
+                    type="button"
+                    className="rounded-xl px-3 py-2 text-sm bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-60"
+                    onClick={saveProject}
+                    disabled={creatingProject}
+                  >
+                    {creatingProject ? 'Saving…' : 'Save'}
+                  </button>
                 </div>
               </div>
+
             </div>
-          </div>z
-        </main>
+          </div>
+        )}
       </div>
     </div>
   );
