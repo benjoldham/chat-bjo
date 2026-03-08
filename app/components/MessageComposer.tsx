@@ -42,7 +42,7 @@ export default function MessageComposer(props: {
   // send
   sending: boolean;
   sendFromComposer: () => void;
-  TypingIndicator: React.ComponentType;
+  stopGeneration: () => void;
 
   // footer
   estimatedInputTokens: number;
@@ -77,7 +77,7 @@ export default function MessageComposer(props: {
     resizeTextarea,
     sending,
     sendFromComposer,
-    TypingIndicator,
+    stopGeneration,
     estimatedInputTokens,
     estimatedInputCostUSD,
     formatUSD,
@@ -288,16 +288,16 @@ export default function MessageComposer(props: {
               aria-label="Attach files"
               disabled={sending}
             >
-              📎
+              <img src="/icons/folder.svg" alt="Attach files" className="h-5 w-5" />
             </button>
 
             {/* Send button pinned bottom-right */}
             <button
-              onClick={() => void sendFromComposer()}
-              disabled={sending || !input.trim()}
+              onClick={() => sending ? stopGeneration() : void sendFromComposer()}
+              disabled={!sending && !input.trim()}
               className="absolute right-2 bottom-2 h-12 px-4 rounded-full bg-zinc-900 text-base font-medium text-white flex items-center justify-center disabled:opacity-40"
             >
-              {sending ? <TypingIndicator /> : 'Send'}
+              {sending ? <span className="h-4 w-4 rounded-sm bg-white block" /> : 'Send'}
             </button>
           </div>
 
