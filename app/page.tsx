@@ -925,6 +925,8 @@ function ChatApp({ onSignOut }: { onSignOut: () => void }) {
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [sending, setSending] = useState(false);
+  const stopRef = useRef<{ aborted: boolean }>({ aborted: false });
+  const typingIdRef = useRef<string | null>(null);
   const [isSwitchingThread, setIsSwitchingThread] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('claude_haiku');
   // Nova Canvas UI controls (only used when nova_canvas is selected)
@@ -1576,6 +1578,7 @@ const items = (res.data ?? [])
     if (!text || sending) return;
 
     setSending(true);
+    stopRef.current = { aborted: false };
     setInput('');
     requestAnimationFrame(() => resizeTextarea());
 
@@ -1669,6 +1672,7 @@ const userMsg = await client.models.ChatMessage.create({
 
     // Add a temporary "thinking" assistant bubble immediately
     const typingId = `typing-${Date.now()}`;
+    typingIdRef.current = typingId;
     const typingCreatedAt = nowIso();
 setMessages((prev) => [
   ...prev,
@@ -1744,6 +1748,8 @@ setMessages((prev) => [
       assistantText = `Error calling chat(): ${e?.message ?? String(e)}`;
     }
 
+    if (stopRef.current.aborted) return;
+
   const assistantCreatedAt = nowIso();
   const assistantMsg = await client.models.ChatMessage.create({
     threadId,
@@ -1788,6 +1794,16 @@ setMessages((prev) => [
   // Refresh monthly totals (best-effort)
 void loadThreads(); // threads include modelKey + we compute totals from that
 
+    typingIdRef.current = null;
+    setSending(false);
+  }
+
+  function stopGeneration() {
+    stopRef.current.aborted = true;
+    if (typingIdRef.current) {
+      setMessages((prev) => prev.filter((m) => m.id !== typingIdRef.current));
+      typingIdRef.current = null;
+    }
     setSending(false);
   }
 
@@ -1978,7 +1994,7 @@ void loadThreads(); // threads include modelKey + we compute totals from that
             resizeTextarea={resizeTextarea}
             sending={sending}
             sendFromComposer={sendFromComposer}
-            TypingIndicator={TypingIndicator}
+            stopGeneration={stopGeneration}
             estimatedInputTokens={estimatedInputTokens}
             estimatedInputCostUSD={estimatedInputCostUSD}
             formatUSD={formatUSD}
