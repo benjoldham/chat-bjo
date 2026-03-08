@@ -134,7 +134,7 @@ export default function Sidebar(props: {
 
                     <img src="/icons/search.svg"  alt="Search your chat history"  className="h-5 w-5" />
 
-                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search chat" className="w-full rounded-lg text-sm font-regular tracking-tighter text-primary text-left outline-none focus:border-zinc-400"/>
+                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search all chats" className="w-full rounded-lg text-sm font-regular tracking-tighter text-primary text-left outline-none focus:border-zinc-400"/>
 
                 </button>
 
